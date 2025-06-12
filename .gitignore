@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Editor and OS files
+.vscode/
+*.swp
+.DS_Store
+
+# Log files
+*.log
+
+# Mujoco temporary files
+*.mjb
+*.mjcf
+
+# ROS build and log folders
+build/
+devel/
+logs/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore mesh and output folders if generated
+meshes/
+output/
+
+# Mujoco log files
+MUJOCO_LOG.TXT
