@@ -1,0 +1,32 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="j2n4s300"> 
+
+
+  
+  <mujoco><compiler meshdir="../meshes/" balanceinertia="true" discardvisual="false" /></mujoco><link name="world" />
+  <joint name="connect_root_and_world" type="fixed">
+    <child link="root" />
+    <parent link="world" />
+    <origin rpy="0 0 0" xyz="0 0 0" />
+  </joint>
+<link name="j2n4s300_link_base">
+    <visual>
+      <geometry>
+        <mesh filename="package://kinova_description/meshes/base.STL" />
+      </geometry>
+      <material name="carbon_fiber">
+        <color rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" />
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <mesh filename="package://kinova_description/meshes/base.STL" />
+      </geometry>
+    </collision>
+    <inertial>
+      <mass value="0.46784" />
+      <origin rpy="0 0 0" xyz="0 0 0.1255" />
+      <inertia ixx="0.000951270861568" ixy="0" ixz="0" iyy="0.000951270861568" iyz="0" izz="0.00037427200000000004" />
+    </inertial>
+  </link>
+</robot>
