@@ -9,7 +9,7 @@ print(f"Current working directory: {cwd}")
 os.chdir(cwd)
 
 
-model = mujoco.MjModel.from_xml_path("kinova_description/urdf/m1n6s300_standalone.urdf")
+model = mujoco.MjModel.from_xml_path("kinova_description/urdf/m1n4s300_standalone.urdf")
 data = mujoco.MjData(model)
 
 
