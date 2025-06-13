@@ -16,9 +16,6 @@ venv/
 # Log files
 *.log
 
-# Mujoco temporary files
-*.mjb
-*.mjcf
 
 # ROS build and log folders
 build/
