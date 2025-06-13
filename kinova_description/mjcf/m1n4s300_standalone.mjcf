@@ -19,62 +19,62 @@
   <worldbody>
     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="base" material="black"/>
     <geom type="mesh" mesh="base" material="black"/>
-    <body name="m1n4s300_link_1" pos="0 0 0.15675" quat="0 0 1 0">
+    <body name="link_1" pos="0 0 0.15675" quat="0 0 1 0">
       <inertial pos="0 -0.002 -0.0605" mass="0.7477" diaginertia="0.00152032 0.00152032 0.00059816"/>
-      <joint name="m1n4s300_joint_1" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-40 40" damping="0.01"/>
+      <joint name="joint_1" pos="0 0 0" axis="0 0 1" range="-3.1415 3.1415" actuatorfrcrange="-40 40" damping="0.01"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="shoulder" material="black"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="ring_big" material="grey"/>
       <geom type="mesh" mesh="shoulder" material="black"/>
-      <body name="m1n4s300_link_2" pos="0 0.0016 -0.11875" quat="0 0 -0.707107 0.707107">
+      <body name="link_2" pos="0 0.0016 -0.11875" quat="0 0 -0.707107 0.707107">
         <inertial pos="0 -0.145 -0.0076" quat="0.707107 0.707107 0 0" mass="0.85968" diaginertia="0.00467091 0.00467091 0.000386856"/>
-        <joint name="m1n4s300_joint_2" pos="0 0 0" axis="0 0 1" range="0.872665 5.41052" actuatorfrcrange="-80 80" damping="0.01"/>
+        <joint name="joint_2" pos="0 0 0" axis="0 0 1" range="0.872665 5.41052" actuatorfrcrange="-80 80" damping="0.01"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="arm_mico" material="black"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_big" material="grey"/>
         <geom type="mesh"  mesh="arm_mico" material="black"/>
-        <body name="m1n4s300_link_3" pos="0 -0.29 0" quat="0 0 1 0">
+        <body name="link_3" pos="0 -0.29 0" quat="0 0 1 0">
           <inertial pos="0 0.0463 -0.0065" quat="0.707107 0.707107 0 0" mass="0.606" diaginertia="0.000383798 0.000383798 0.0001212"/>
-          <joint name="m1n4s300_joint_3" pos="0 0 0" axis="0 0 1" range="0.610865 5.67232" actuatorfrcrange="-40 40" damping="0.01"/>
+          <joint name="joint_3" pos="0 0 0" axis="0 0 1" range="0.610865 5.67232" actuatorfrcrange="-40 40" damping="0.01"/>
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="forearm_mico" material="black"/>
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_big" material="grey"/>
           <geom type="mesh"  mesh="forearm_mico" material="black"/>
-          <body name="m1n4s300_link_4" pos="0 0.1231 -0.0086" quat="0 0 -0.707107 0.707107">
+          <body name="link_4" pos="0 0.1231 -0.0086" quat="0 0 -0.707107 0.707107">
             <inertial pos="0 0 -0.06" quat="0.5 0.5 -0.5 0.5" mass="0.78" diaginertia="0.000624 0.000370499 0.000370499"/>
-            <joint name="m1n4s300_joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.01"/>
+            <joint name="joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.01"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="hand_2finger" material="black"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_small" material="grey"/>
             <geom type="mesh"  mesh="hand_2finger" material="black"/>
-            <body name="m1n4s300_link_finger_1" pos="0.00279 0.03126 -0.11467" quat="0.240238 -0.633666 -0.389536 0.623711">
+            <body name="link_finger_1" pos="0.00279 0.03126 -0.11467" quat="0.240238 -0.633666 -0.389536 0.623711">
               <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
-              <joint name="m1n4s300_joint_finger_1" pos="0 0 0" axis="0 0 1" range="0 1.51" actuatorfrcrange="-2 2" damping="0.01"/>
+              <joint name="joint_finger_1" pos="0 0 0" axis="0 0 1" range="0 1.51" actuatorfrcrange="-2 2" damping="0.01"/>
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_proximal" material="grey"/>
               <geom type="mesh"  mesh="finger_proximal" material="grey"/>
-              <body name="m1n4s300_link_finger_tip_1" pos="0.044 -0.003 0">
+              <body name="link_finger_tip_1" pos="0.044 -0.003 0">
                 <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
-                <joint name="m1n4s300_joint_finger_tip_1" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
+                <joint name="joint_finger_tip_1" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_distal" material="grey"/>
                 <geom type="mesh"  mesh="finger_distal" material="grey"/>
               </body>
             </body>
-            <body name="m1n4s300_link_finger_2" pos="0.02226 -0.02707 -0.11482" quat="0.659653 -0.37146 0.601679 -0.254671">
+            <body name="link_finger_2" pos="0.02226 -0.02707 -0.11482" quat="0.659653 -0.37146 0.601679 -0.254671">
               <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
-              <joint name="m1n4s300_joint_finger_2" pos="0 0 0" axis="0 0 1" range="0 1.51" actuatorfrcrange="-2 2" damping="0.01"/>
+              <joint name="joint_finger_2" pos="0 0 0" axis="0 0 1" range="0 1.51" actuatorfrcrange="-2 2" damping="0.01"/>
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_proximal" material="grey"/>
               <geom type="mesh"  mesh="finger_proximal" material="grey"/>
-              <body name="m1n4s300_link_finger_tip_2" pos="0.044 -0.003 0">
+              <body name="link_finger_tip_2" pos="0.044 -0.003 0">
                 <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
-                <joint name="m1n4s300_joint_finger_tip_2" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
+                <joint name="joint_finger_tip_2" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_distal" material="grey"/>
                 <geom type="mesh"  mesh="finger_distal" material="grey"/>
               </body>
             </body>
-            <body name="m1n4s300_link_finger_3" pos="-0.02226 -0.02707 -0.11482" quat="0.601679 -0.254671 0.659653 -0.37146">
+            <body name="link_finger_3" pos="-0.02226 -0.02707 -0.11482" quat="0.601679 -0.254671 0.659653 -0.37146">
               <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
-              <joint name="m1n4s300_joint_finger_3" pos="0 0 0" axis="0 0 1" range="0 1.51" actuatorfrcrange="-2 2" damping="0.01"/>
+              <joint name="joint_finger_3" pos="0 0 0" axis="0 0 1" range="0 1.51" actuatorfrcrange="-2 2" damping="0.01"/>
               <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_proximal" material="grey"/>
               <geom type="mesh"  mesh="finger_proximal" material="grey"/>
-              <body name="m1n4s300_link_finger_tip_3" pos="0.044 -0.003 0">
+              <body name="link_finger_tip_3" pos="0.044 -0.003 0">
                 <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
-                <joint name="m1n4s300_joint_finger_tip_3" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
+                <joint name="joint_finger_tip_3" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_distal" material="grey"/>
                 <geom type="mesh"  mesh="finger_distal" material="grey"/>
               </body>
@@ -84,4 +84,18 @@
       </body>
     </body>
   </worldbody>
+
+<actuator>
+  <motor name="motor_joint_1" joint="joint_1" gear="160"/>
+  <motor name="motor_joint_2" joint="joint_2" gear="160"/>
+  <motor name="motor_joint_3" joint="joint_3" gear="160"/>
+  <motor name="motor_joint_4" joint="joint_4" gear="160"/>
+  <motor name="motor_joint_finger_1" joint="joint_finger_1" gear="1"/>
+  <motor name="motor_joint_finger_tip_1" joint="joint_finger_tip_1" gear="1"/>
+  <motor name="motor_joint_finger_2" joint="joint_finger_2" gear="1"/>
+  <motor name="motor_joint_finger_tip_2" joint="joint_finger_tip_2" gear="1"/>
+  <motor name="motor_joint_finger_3" joint="joint_finger_3" gear="1"/>
+  <motor name="motor_joint_finger_tip_3" joint="joint_finger_tip_3" gear="1"/>
+</actuator>
+
 </mujoco>
