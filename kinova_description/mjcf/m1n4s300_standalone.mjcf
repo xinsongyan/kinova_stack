@@ -21,7 +21,7 @@
     <geom type="mesh" mesh="base" material="black"/>
     <body name="link_1" pos="0 0 0.15675" quat="0 0 1 0">
       <inertial pos="0 -0.002 -0.0605" mass="0.7477" diaginertia="0.00152032 0.00152032 0.00059816"/>
-      <joint name="joint_1" pos="0 0 0" axis="0 0 1" range="-3.1415 3.1415" actuatorfrcrange="-40 40" damping="0.01"/>
+      <joint name="joint_1" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-40 40" damping="0.01"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="shoulder" material="black"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="ring_big" material="grey"/>
       <geom type="mesh" mesh="shoulder" material="black"/>
