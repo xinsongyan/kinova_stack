@@ -21,25 +21,25 @@
     <geom type="mesh" mesh="base" material="black"/>
     <body name="link_1" pos="0 0 0.15675" quat="0 0 1 0">
       <inertial pos="0 -0.002 -0.0605" mass="0.7477" diaginertia="0.00152032 0.00152032 0.00059816"/>
-      <joint name="joint_1" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-40 40" damping="0.01"/>
+      <joint name="joint_1" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-40 40" damping="0.1"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="shoulder" material="black"/>
       <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="ring_big" material="grey"/>
       <geom type="mesh" mesh="shoulder" material="black"/>
       <body name="link_2" pos="0 0.0016 -0.11875" quat="0 0 -0.707107 0.707107">
         <inertial pos="0 -0.145 -0.0076" quat="0.707107 0.707107 0 0" mass="0.85968" diaginertia="0.00467091 0.00467091 0.000386856"/>
-        <joint name="joint_2" pos="0 0 0" axis="0 0 1" range="0.872665 5.41052" actuatorfrcrange="-80 80" damping="0.01"/>
+        <joint name="joint_2" pos="0 0 0" axis="0 0 1" range="0.872665 5.41052" actuatorfrcrange="-80 80" damping="0.1"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="arm_mico" material="black"/>
         <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_big" material="grey"/>
         <geom type="mesh"  mesh="arm_mico" material="black"/>
         <body name="link_3" pos="0 -0.29 0" quat="0 0 1 0">
           <inertial pos="0 0.0463 -0.0065" quat="0.707107 0.707107 0 0" mass="0.606" diaginertia="0.000383798 0.000383798 0.0001212"/>
-          <joint name="joint_3" pos="0 0 0" axis="0 0 1" range="0.610865 5.67232" actuatorfrcrange="-40 40" damping="0.01"/>
+          <joint name="joint_3" pos="0 0 0" axis="0 0 1" range="0.610865 5.67232" actuatorfrcrange="-40 40" damping="0.1"/>
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="forearm_mico" material="black"/>
           <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_big" material="grey"/>
           <geom type="mesh"  mesh="forearm_mico" material="black"/>
           <body name="link_4" pos="0 0.1231 -0.0086" quat="0 0 -0.707107 0.707107">
             <inertial pos="0 0 -0.06" quat="0.5 0.5 -0.5 0.5" mass="0.78" diaginertia="0.000624 0.000370499 0.000370499"/>
-            <joint name="joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.01"/>
+            <joint name="joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.1"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="hand_2finger" material="black"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_small" material="grey"/>
             <geom type="mesh"  mesh="hand_2finger" material="black"/>
