@@ -1,37 +1,26 @@
-import mujoco
-import mujoco.viewer
+
 import os
+import numpy as np
 
-
-def model_from_urdf(urdf_path):
-    """Load a Mujoco model from a URDF file."""
-    return mujoco.MjModel.from_xml_path(urdf_path)
-
-def model_from_mjcf(mjcf_path):
-    """Load a Mujoco model from a MJCF file."""
-    return mujoco.MjModel.from_xml_path(mjcf_path)
-
-
-
-
-
-
+from sim_env import SimEnv
+from controller import PDController
 
 
 
 def main():
+    sim = SimEnv("kinova_description/mjcf/m1n4s300_standalone.mjcf")
     
-    # model = model_from_urdf("kinova_description/urdf/m1n4s300_standalone.urdf")
-    model = model_from_mjcf("kinova_description/mjcf/m1n4s300_standalone.mjcf")
-    data = mujoco.MjData(model)
+    Kp = np.array([100, 100, 100, 100, 1, 1, 1, 1, 1, 1])  # Proportional gains
+    Kd = np.array([1, 1, 1, 1, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01])  # Derivative gains
+    pd_controller = PDController(Kp=Kp, Kd=Kd)
+    
+    q_desired = sim.get_model_keyframe("home1").qpos  # shape (model.nu,)
 
-
-    # Launch the viewer
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        print("Press ESC to exit.")
-        while viewer.is_running():
-            mujoco.mj_step(model, data)
-            viewer.sync()
+    while True:
+        q, qd = sim.get_state()
+        tau = pd_controller.compute(q, qd, q_desired)
+        sim.set_ctrl(tau)
+        sim.step()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 <mujoco model="m1n4s300">
+  <option timestep="0.001"/>
   <compiler angle="radian" meshdir="../meshes/"/>
 
   <asset>
@@ -86,10 +87,10 @@
   </worldbody>
 
 <actuator>
-  <motor name="motor_joint_1" joint="joint_1" gear="160"/>
-  <motor name="motor_joint_2" joint="joint_2" gear="160"/>
-  <motor name="motor_joint_3" joint="joint_3" gear="160"/>
-  <motor name="motor_joint_4" joint="joint_4" gear="160"/>
+  <motor name="motor_joint_1" joint="joint_1" gear="1"/>
+  <motor name="motor_joint_2" joint="joint_2" gear="1"/>
+  <motor name="motor_joint_3" joint="joint_3" gear="1"/>
+  <motor name="motor_joint_4" joint="joint_4" gear="1"/>
   <motor name="motor_joint_finger_1" joint="joint_finger_1" gear="1"/>
   <motor name="motor_joint_finger_tip_1" joint="joint_finger_tip_1" gear="1"/>
   <motor name="motor_joint_finger_2" joint="joint_finger_2" gear="1"/>
@@ -97,5 +98,12 @@
   <motor name="motor_joint_finger_3" joint="joint_finger_3" gear="1"/>
   <motor name="motor_joint_finger_tip_3" joint="joint_finger_tip_3" gear="1"/>
 </actuator>
+
+<keyframe>
+  <key name="home1" 
+       qpos="1.48353 3.22886 4.90438 0 0 0 0 0 0 0"/> 
+  <key name="home2" 
+       qpos="1.57080 4.79966 5.58505 0 0 0 0 0 0 0"/>
+</keyframe>
 
 </mujoco>
