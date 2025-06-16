@@ -100,10 +100,12 @@
 </actuator>
 
 <keyframe>
-  <key name="home1" 
+  <key name="home" 
        qpos="1.48353 3.22886 4.90438 0 0 0 0 0 0 0"/> 
-  <key name="home2" 
+  <key name="folded" 
        qpos="1.57080 4.79966 5.58505 0 0 0 0 0 0 0"/>
+  <key name="extended"
+        qpos="1.57080 3.1415 3.1415 0 0 0 0 0 0 0"/>
 </keyframe>
 
 </mujoco>

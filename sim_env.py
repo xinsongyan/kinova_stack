@@ -1,6 +1,7 @@
 import mujoco
 import mujoco.viewer
 import numpy as np
+import sys
 
 
 def get_test_model_path():
@@ -18,19 +19,30 @@ class SimEnv:
         self.dt = self.model.opt.timestep
         self.nu = self.model.nu
 
-        self.launch_viewer()
-        
-    def launch_viewer(self):
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        
+
 
 
     def step(self):
         mujoco.mj_step(self.model, self.data)
-        self.viewer.sync()
-
+        self.sync_viewer()
+        
+    def sync_viewer(self):
+        if self.viewer.is_running():
+            self.viewer.sync()
+        else:
+            sys.exit("Viewer closed. Exiting simulation.")
 
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
+
+    def set_model_keyframe(self, name):
+        keyframe = self.model.keyframe(name=name)
+        if keyframe is None:
+            raise ValueError(f"Keyframe '{name}' not found in the model.")
+        mujoco.mj_resetDataKeyframe(self.model, self.data, keyframe.id)
+
 
     def get_state(self):
         return np.copy(self.data.qpos), np.copy(self.data.qvel)
