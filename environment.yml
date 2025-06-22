@@ -1,0 +1,10 @@
+name: kinova_stack
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - mujoco
+  - pip
+  - pip:
+      - mujoco-python-viewer
