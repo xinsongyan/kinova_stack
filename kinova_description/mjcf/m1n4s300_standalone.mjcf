@@ -11,13 +11,26 @@
     <mesh name="ring_big" content_type="model/stl" file="ring_big.STL"/>
     <mesh name="arm_mico" content_type="model/stl" file="arm_mico.STL"/>
     <mesh name="forearm_mico" content_type="model/stl" file="forearm_mico.STL"/>
-    <mesh name="hand_2finger" content_type="model/stl" file="hand_2finger.STL"/>
-    <mesh name="ring_small" content_type="model/stl" file="ring_small.STL"/>
+    <mesh name="hand_2finger" content_type="model/stl" file="hand_3finger.STL"/>
+    <mesh name="ring_small" content_type="model/stl" file="ring_big.STL"/>
     <mesh name="finger_proximal" content_type="model/stl" file="finger_proximal.STL"/>
     <mesh name="finger_distal" content_type="model/stl" file="finger_distal.STL"/>
   </asset>
 
   <worldbody>
+    <!-- TABLE: static cube/box under the arm -->
+    <body name="table" pos="0 -0.6 -0.1">
+      <!-- size is half-extents: (x_half, y_half, z_half) -->
+      <!-- This makes a 0.6m x 0.6m x 0.10m table top -->
+      <geom name="table_geom"
+            type="box"
+            pos="0 0 0.05"
+            size="0.60 0.60 0.05"
+            rgba="0.6 0.45 0.3 1"
+            contype="1"
+            conaffinity="1"
+            friction="1 0.005 0.0001"/>
+    </body>
     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="base" material="black"/>
     <geom type="mesh" mesh="base" material="black"/>
     <body name="link_1" pos="0 0 0.15675" quat="0 0 1 0">

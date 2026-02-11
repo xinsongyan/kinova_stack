@@ -13,13 +13,13 @@ def get_test_model_path():
 
 
 class SimEnv:
-    def __init__(self, model_path):
+    def __init__(self, model_path, viewer=True):
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
         self.dt = self.model.opt.timestep
         self.nu = self.model.nu
 
-        self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        self.viewer = mujoco.viewer.launch_passive(self.model, self.data) if viewer else None
         
 
 
@@ -29,10 +29,17 @@ class SimEnv:
         self.sync_viewer()
         
     def sync_viewer(self):
+        if self.viewer is None:
+            return
         if self.viewer.is_running():
             self.viewer.sync()
         else:
             sys.exit("Viewer closed. Exiting simulation.")
+
+    def close(self):
+        if self.viewer is not None:
+            self.viewer.close()
+            self.viewer = None
 
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
@@ -54,6 +61,10 @@ class SimEnv:
         return self.model.keyframe(name=name)
 
     def set_ctrl(self, ctrl):
+        ctrl = np.asarray(ctrl, dtype=float)
+        expected_shape = (self.model.nu,)
+        if ctrl.shape != expected_shape:
+            raise ValueError(f"ctrl must have shape {expected_shape}, got {ctrl.shape}")
         self.data.ctrl[:] = ctrl
 
 

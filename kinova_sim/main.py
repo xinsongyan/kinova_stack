@@ -17,7 +17,7 @@ def main():
     
     q_ini = sim.get_model_keyframe("folded").qpos  # shape (model.nq,)
     q_des = sim.get_model_keyframe("home").qpos  # shape (model.nu,)
-    T = 2.0  # Duration for the transition from q_ini to q_des
+    T = 10.0  # Duration for the transition from q_ini to q_des
     while True:
         t =  sim.get_time()
         q, qd = sim.get_state()
