@@ -99,6 +99,10 @@ class KinovaMuJoCoBackend(KinovaBackend):
     def dof(self) -> int:
         return len(self._joint_names)
 
+    @property
+    def arm_dof(self) -> int:
+        return len(self._arm_indices)
+
     def init(self) -> None:
         if self._env is not None:
             return
@@ -172,17 +176,24 @@ class KinovaMuJoCoBackend(KinovaBackend):
         if self._initial_keyframe:
             keyframe = env.get_model_keyframe(self._initial_keyframe)
             if keyframe is not None:
-                target = np.array(keyframe.qpos[: self.dof], dtype=float)
+                # Extract only arm joint values from the keyframe
+                all_qpos = np.array(keyframe.qpos[: self.dof], dtype=float)
+                target = np.array([all_qpos[idx] for idx in self._arm_indices], dtype=float)
         if target is None:
-            target = np.zeros(self.dof, dtype=float)
+            target = np.zeros(self.arm_dof, dtype=float)
         self.send_joint_position_rad(target)
 
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
         self._require_env()
-        if len(q_des) < self.dof:
-            raise ValueError(f"Expected at least {self.dof} joint targets, got {len(q_des)}.")
-        q = np.array(q_des[: self.dof], dtype=float)
-        self._q_target_desired = self._clip_q(q)
+        n_arm = self.arm_dof
+        if len(q_des) < n_arm:
+            raise ValueError(f"Expected at least {n_arm} arm joint targets, got {len(q_des)}.")
+        q_arm = np.array(q_des[: n_arm], dtype=float)
+        # Preserve existing finger targets, only update arm joints
+        q_full = self._require_q_target_desired().copy()
+        for local_idx, joint_idx in enumerate(self._arm_indices):
+            q_full[joint_idx] = q_arm[local_idx]
+        self._q_target_desired = self._clip_q(q_full)
         if self._q_target is None:
             self._q_target = self._q_target_desired.copy()
 
@@ -338,7 +349,7 @@ class KinovaMuJoCoBackend(KinovaBackend):
         data.qpos[:] = qpos_initial
         data.qvel[:] = qvel_initial
         mujoco.mj_forward(model, data)
-        return [float(value) for value in q]
+        return [float(q[idx]) for idx in self._arm_indices]
 
     def get_end_effector_pose(
         self,

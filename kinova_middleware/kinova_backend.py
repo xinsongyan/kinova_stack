@@ -80,7 +80,12 @@ class KinovaBackend(ABC):
     @property
     @abstractmethod
     def dof(self) -> int:
-        """Number of arm joints (constant for the backend)."""
+        """Total number of joints including fingers (constant for the backend)."""
+
+    @property
+    @abstractmethod
+    def arm_dof(self) -> int:
+        """Number of arm-only joints (excluding fingers)."""
 
     @abstractmethod
     def init(self) -> None:
@@ -96,7 +101,7 @@ class KinovaBackend(ABC):
 
     @abstractmethod
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
-        """Command joint positions in radians."""
+        """Command arm joint positions in radians (arm joints only, not fingers)."""
 
     @abstractmethod
     def get_end_effector_pose(
@@ -172,6 +177,10 @@ class SafetyWrapperBackend(KinovaBackend):
     def dof(self) -> int:
         return self._inner.dof
 
+    @property
+    def arm_dof(self) -> int:
+        return self._inner.arm_dof
+
     def init(self) -> None:
         self._inner.init()
 
@@ -182,18 +191,15 @@ class SafetyWrapperBackend(KinovaBackend):
         self._inner.move_home()
 
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
-        if len(q_des) < self.dof:
-            raise ValueError(f"Expected at least {self.dof} joint targets, got {len(q_des)}.")
-        q_target = [float(q) for q in q_des[: self.dof]]
+        n_arm = self.arm_dof
+        if len(q_des) < n_arm:
+            raise ValueError(f"Expected at least {n_arm} arm joint targets, got {len(q_des)}.")
+        q_target = [float(q) for q in q_des[: n_arm]]
         if any(not math.isfinite(q) for q in q_target):
             raise ValueError("Joint targets must be finite.")
 
-        q_current = self._inner.get_joint_angles_rad()
-        if len(q_current) < self.dof:
-            raise ValueError(
-                f"Backend returned {len(q_current)} joints, expected at least {self.dof}."
-            )
-        q_current = [float(q) for q in q_current[: self.dof]]
+        q_current_all = self._inner.get_joint_angles_rad()
+        q_current = [float(q) for q in q_current_all[: n_arm]]
 
         q_target = self._apply_joint_limits(q_target)
         q_target = self._apply_step_limits(q_current, q_target)
@@ -201,10 +207,7 @@ class SafetyWrapperBackend(KinovaBackend):
         q_target = self._apply_workspace_limits(q_target)
         q_target = self._apply_joint_limits(q_target)
 
-        q_out = list(q_des)
-        for idx in range(self.dof):
-            q_out[idx] = q_target[idx]
-        self._inner.send_joint_position_rad(q_out)
+        self._inner.send_joint_position_rad(q_target)
         self._last_command_time = time.monotonic()
 
     def get_end_effector_pose(
@@ -234,7 +237,7 @@ class SafetyWrapperBackend(KinovaBackend):
                 if value < low or value > high:
                     raise ValueError("Cartesian pose rejected: IK solution violates joint limits.")
 
-        return [float(q) for q in q_candidate[: self.dof]]
+        return [float(q) for q in q_candidate[: self.arm_dof]]
 
     def step(self) -> bool:
         return self._inner.step()

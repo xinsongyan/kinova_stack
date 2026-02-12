@@ -25,6 +25,10 @@ class KinovaController:
     def dof(self) -> int:
         return self._backend.dof
 
+    @property
+    def arm_dof(self) -> int:
+        return self._backend.arm_dof
+
     def init(self) -> None:
         self._backend.init()
 

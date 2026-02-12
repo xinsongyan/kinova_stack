@@ -48,6 +48,10 @@ class KinovaSDKBackend(KinovaBackend):
     def dof(self) -> int:
         return 7
 
+    @property
+    def arm_dof(self) -> int:
+        return 7
+
     def init(self) -> None:
         if self._api is not None:
             return
@@ -78,10 +82,11 @@ class KinovaSDKBackend(KinovaBackend):
 
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
         api = self._require_api()
-        if len(q_des) < self.dof:
-            raise ValueError(f"Expected at least {self.dof} joint targets, got {len(q_des)}.")
+        n_arm = self.arm_dof
+        if len(q_des) < n_arm:
+            raise ValueError(f"Expected at least {n_arm} arm joint targets, got {len(q_des)}.")
 
-        deg = [math.degrees(float(q)) for q in q_des[: self.dof]]
+        deg = [math.degrees(float(q)) for q in q_des[: n_arm]]
         point = TrajectoryPoint()
         point.Position.Type = ANGULAR_POSITION
         point.Position.HandMode = HAND_NOMOVEMENT

@@ -33,7 +33,7 @@ ROLL_DEG = 10.0
 PITCH_DEG = -5.0
 YAW_DEG = 20.0
 
-JOINT_TARGET_DEG = [0.0, 90.0, 250.0, 0.0, 0, 0, 0, 0, 0, 0]
+JOINT_TARGET_DEG = [0.0, 88.0, 250.0, 0.0]
 
 # Smooth target tracking to reduce jerk/jitter.
 # Set to None to disable.
@@ -124,15 +124,15 @@ def main() -> int:
         _run_steps(controller, 5.0)
 
         for i in range(36):
-            if len(JOINT_TARGET_DEG) < controller.dof:
+            if len(JOINT_TARGET_DEG) < controller.arm_dof:
                 raise ValueError(
-                    f"JOINT_TARGET_DEG expects at least {controller.dof} values, "
+                    f"JOINT_TARGET_DEG expects at least {controller.arm_dof} values, "
                     f"got {len(JOINT_TARGET_DEG)}."
                 )
-            joint_rad = [math.radians(v) for v in JOINT_TARGET_DEG[: controller.dof]]
-            print(f"Moving to joint targets (deg): {JOINT_TARGET_DEG[: controller.dof]}")
+            joint_rad = [math.radians(v) for v in JOINT_TARGET_DEG[: controller.arm_dof]]
+            print(f"Moving to joint targets (deg): {JOINT_TARGET_DEG[: controller.arm_dof]}")
             controller.send_joint_position_rad(joint_rad)
-            _run_steps(controller, 5.0, hold_seconds=0.4)
+            _run_steps(controller, 10.0, hold_seconds=0.4)
             current_pos, current_quat = controller.get_end_effector_pose()
             current_pos, current_quat = pose_smoother.update(current_pos, current_quat)
             print(
