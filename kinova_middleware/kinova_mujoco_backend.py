@@ -46,11 +46,11 @@ DEFAULT_FINGER_JOINTS = (
 )
 
 DEFAULT_EE_BODY = "link_4"
-IK_MAX_ITERS = 200
+IK_MAX_ITERS = 500
 IK_POS_TOL = 1e-3
 IK_ROT_TOL = 1e-2
 IK_DAMPING = 1e-2
-IK_STEP_SIZE = 0.5
+IK_STEP_SIZE = 0.8
 IK_ORIENTATION_WEIGHT = 0.3
 
 
@@ -110,10 +110,7 @@ class KinovaMuJoCoBackend(KinovaBackend):
         self._env = SimEnv(model_path, viewer=self._viewer)
 
         if self._initial_keyframe:
-            try:
-                self._env.set_model_keyframe(self._initial_keyframe)
-            except ValueError:
-                pass
+            self._env.set_model_keyframe(self._initial_keyframe)
 
         model = self._env.model
         data = self._env.data
@@ -176,8 +173,9 @@ class KinovaMuJoCoBackend(KinovaBackend):
         if self._initial_keyframe:
             keyframe = env.get_model_keyframe(self._initial_keyframe)
             if keyframe is not None:
-                # Extract only arm joint values from the keyframe
-                all_qpos = np.array(keyframe.qpos[: self.dof], dtype=float)
+                # Extract arm joint values using qpos addresses (robust to freejoints)
+                kf_qpos = np.array(keyframe.qpos, dtype=float)
+                all_qpos = np.array([kf_qpos[adr] for adr in self._qpos_adr], dtype=float)
                 target = np.array([all_qpos[idx] for idx in self._arm_indices], dtype=float)
         if target is None:
             target = np.zeros(self.arm_dof, dtype=float)
@@ -244,6 +242,26 @@ class KinovaMuJoCoBackend(KinovaBackend):
         qd = np.array([env.data.qvel[adr] for adr in self._qvel_adr], dtype=float)
         max_pos_err = float(np.max(np.abs(q_target_desired - q)))
         max_vel = float(np.max(np.abs(qd)))
+        return bool(max_pos_err <= float(pos_tol_rad) and max_vel <= float(vel_tol_rad_s))
+
+    def _debug_counter(self) -> int:
+        if not hasattr(self, "_step_count"):
+            self._step_count = 0
+        self._step_count += 1
+        return self._step_count
+
+    def is_desired_position_reached(
+        self,
+        pos_tol_rad: float = math.radians(0.8),
+        vel_tol_rad_s: float = math.radians(2.0),
+    ) -> bool:
+        env = self._require_env()
+        q_target_desired = self._require_q_target_desired()
+        q = np.array([env.data.qpos[adr] for adr in self._qpos_adr], dtype=float)
+        qd = np.array([env.data.qvel[adr] for adr in self._qvel_adr], dtype=float)
+        max_pos_err = float(np.max(np.abs(q_target_desired - q)))
+        max_vel = float(np.max(np.abs(qd)))
+
         return bool(max_pos_err <= float(pos_tol_rad) and max_vel <= float(vel_tol_rad_s))
 
     def get_joint_angles_rad(self) -> list[float]:
@@ -351,6 +369,74 @@ class KinovaMuJoCoBackend(KinovaBackend):
         mujoco.mj_forward(model, data)
         return [float(q[idx]) for idx in self._arm_indices]
 
+    def solve_ik_position_only(
+        self,
+        target_pos: Sequence[float],
+        q_seed: Sequence[float] | None = None,
+    ) -> list[float]:
+        """Solve IK for position only (no orientation constraint).
+
+        Uses only the 3×N_arm positional Jacobian.  With a 4-DOF arm this
+        gives 1 redundant DOF, allowing good reachability.
+        """
+        env = self._require_env()
+        model = env.model
+        data = env.data
+
+        target_pos_arr = np.array(target_pos, dtype=float)
+        if target_pos_arr.shape != (3,):
+            raise ValueError("target_pos must have 3 elements.")
+
+        qpos_initial = data.qpos.copy()
+        qvel_initial = data.qvel.copy()
+
+        if q_seed is not None:
+            if len(q_seed) < self.dof:
+                raise ValueError(f"Expected at least {self.dof} seed joints, got {len(q_seed)}.")
+            q = np.array(q_seed[: self.dof], dtype=float)
+        else:
+            q = np.array([data.qpos[adr] for adr in self._qpos_adr], dtype=float)
+        q_arm = q[self._arm_indices].copy()
+
+        jacp = np.zeros((3, model.nv), dtype=float)
+        jacr = np.zeros((3, model.nv), dtype=float)  # needed for API but unused
+
+        for it in range(IK_MAX_ITERS):
+            data.qpos[:] = qpos_initial
+            for idx, adr in enumerate(self._qpos_adr):
+                data.qpos[adr] = q[idx]
+            mujoco.mj_forward(model, data)
+
+            pos, _ = self._get_ee_pose_wxyz(data)
+            pos_err = target_pos_arr - pos
+
+            if np.linalg.norm(pos_err) <= IK_POS_TOL:
+                self._last_ik_iterations = it + 1
+                break
+
+            self._fill_jacobian(model, data, jacp, jacr)
+            cols = self._arm_dof_adrs
+            jac_pos = jacp[:, cols]  # 3 × N_arm
+
+            jjt = jac_pos @ jac_pos.T
+            damping = IK_DAMPING * IK_DAMPING * np.eye(3)
+            dq = jac_pos.T @ np.linalg.solve(jjt + damping, pos_err)
+            q_arm = q_arm + IK_STEP_SIZE * dq
+
+            for local_idx, joint_idx in enumerate(self._arm_indices):
+                low, high = self._joint_limits[joint_idx]
+                if np.isfinite(low) or np.isfinite(high):
+                    q_arm[local_idx] = float(np.clip(q_arm[local_idx], low, high))
+
+            q[self._arm_indices] = q_arm
+        else:
+            self._last_ik_iterations = IK_MAX_ITERS
+
+        data.qpos[:] = qpos_initial
+        data.qvel[:] = qvel_initial
+        mujoco.mj_forward(model, data)
+        return [float(q[idx]) for idx in self._arm_indices]
+
     def get_end_effector_pose(
         self,
     ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
@@ -420,13 +506,18 @@ class KinovaMuJoCoBackend(KinovaBackend):
         return aid
 
     @staticmethod
+    @staticmethod
     def _default_gains(dof: int) -> tuple[np.ndarray, np.ndarray]:
         if dof <= 4:
-            kp = np.full(dof, 200.0, dtype=float)
-            kd = np.full(dof, 8.0, dtype=float)
+            # Arm only
+            kp = np.full(dof, 800.0, dtype=float)
+            kd = np.full(dof, 80.0, dtype=float)
             return kp, kd
+        
         kp = np.full(dof, 1.0, dtype=float)
         kd = np.full(dof, 0.01, dtype=float)
+        
+        # Arm joints
         kp[:4] = 200.0
         kd[:4] = 8.0
         return kp, kd

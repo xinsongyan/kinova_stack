@@ -1,11 +1,12 @@
 <mujoco model="m1n4s300">
   <option timestep="0.001"/>
-  <compiler angle="radian" meshdir="../meshes/"/>
+  <compiler angle="radian" meshdir="../meshes/" balanceinertia="true"/>
 
   <asset>
     <material name="white" rgba="1 1 1 1"/>
     <material name="black" rgba="0.2 0.2 0.2 1"/>
     <material name="grey" rgba="0.792157 0.819608 0.933333 1"/>
+    <material name="red_cube" rgba="0.9 0.15 0.15 1" specular="0.4" shininess="0.3"/>
     <mesh name="base" content_type="model/stl" file="base.STL"/>
     <mesh name="shoulder" content_type="model/stl" file="shoulder.STL"/>
     <mesh name="ring_big" content_type="model/stl" file="ring_big.STL"/>
@@ -18,19 +19,24 @@
   </asset>
 
   <worldbody>
-    <!-- TABLE: static cube/box under the arm -->
-    <body name="table" pos="0 -0.6 -0.1">
-      <!-- size is half-extents: (x_half, y_half, z_half) -->
-      <!-- This makes a 0.6m x 0.6m x 0.10m table top -->
-      <geom name="table_geom"
+    <!-- Ground plane -->
+    <geom name="ground" type="plane" size="2 2 0.01" rgba="0.4 0.4 0.4 1"
+          contype="1" conaffinity="1" friction="1 0.005 0.0001"/>
+
+    <!-- MOVABLE CUBE: free body the arm can push / pick up -->
+    <body name="cube" pos="0.15 -0.35 0.22">
+      <freejoint name="cube_joint"/>
+      <inertial pos="0 0 0" mass="0.05" diaginertia="0.0000167 0.0000167 0.00001"/>
+      <geom name="cube_geom"
             type="box"
-            pos="0 0 0.05"
-            size="0.60 0.60 0.05"
-            rgba="0.6 0.45 0.3 1"
+            size="0.03 0.06 0.02"
+            material="red_cube"
             contype="1"
             conaffinity="1"
-            friction="1 0.005 0.0001"/>
+            friction="5 0.005 0.0001"
+            solref="0.01 1"/>
     </body>
+
     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="base" material="black"/>
     <geom type="mesh" mesh="base" material="black"/>
     <body name="link_1" pos="0 0 0.15675" quat="0 0 1 0">
@@ -54,6 +60,9 @@
           <body name="link_4" pos="0 0.1231 -0.0086" quat="0 0 -0.707107 0.707107">
             <inertial pos="0 0 -0.06" quat="0.5 0.5 -0.5 0.5" mass="0.78" diaginertia="0.000624 0.000370499 0.000370499"/>
             <joint name="joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.1"/>
+            <!-- DEBUG: green sphere marking the EE reference point (adjust pos to calibrate) -->
+            <site name="ee_marker" pos="0 0 -0.13" size="0.012"
+                  rgba="0.1 1.0 0.1 0.0" type="sphere"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="hand_2finger" material="black"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_small" material="grey"/>
             <geom type="mesh"  mesh="hand_2finger" material="black"/>
@@ -113,12 +122,13 @@
 </actuator>
 
 <keyframe>
+  <!-- qpos order: cube(x y z qw qx qy qz)  joint_1..joint_4  finger joints x6 -->
   <key name="home" 
-       qpos="1.48353 3.22886 4.90438 0 0 0 0 0 0 0"/> 
+       qpos="0.15 -0.35 0.02  1 0 0 0   1.48353 3.22886 4.90438 0 0 0 0 0 0 0"/> 
   <key name="folded" 
-       qpos="1.57080 4.79966 5.58505 0 0 0 0 0 0 0"/>
+       qpos="0.15 -0.35 0.02  1 0 0 0   1.57080 4.79966 5.58505 0 0 0 0 0 0 0"/>
   <key name="extended"
-        qpos="1.57080 3.1415 3.1415 0 0 0 0 0 0 0"/>
+       qpos="0.15 -0.35 0.02  1 0 0 0   1.57080 3.1415 3.1415 0 0 0 0 0 0 0"/>
 </keyframe>
 
 </mujoco>

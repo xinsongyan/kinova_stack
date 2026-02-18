@@ -118,8 +118,20 @@ class KinovaBackend(ABC):
     ) -> list[float]:
         """Solve IK for target pose; returns joint targets in radians."""
 
+    def solve_ik_position_only(
+        self,
+        target_pos: Sequence[float],
+        q_seed: Sequence[float] | None = None,
+    ) -> list[float]:
+        """Solve IK for position only (no orientation constraint).
+
+        Default implementation falls back to ``solve_ik`` with identity
+        quaternion.  Backends may override with a specialised solver.
+        """
+        return self.solve_ik(target_pos, [0.0, 0.0, 0.0, 1.0], q_seed)
+
     @abstractmethod
-    def step(self) -> bool:
+    def step(self, **kwargs: Any) -> bool:
         """Advance backend control loop and report whether current target is reached."""
 
     @abstractmethod
@@ -133,6 +145,27 @@ class KinovaBackend(ABC):
     @abstractmethod
     def set_gripper_percent(self, percent: float) -> None:
         """Control gripper opening as a percentage in [0.0, 1.0]."""
+
+    def rotate_wrist(self, angle_deg: float) -> None:
+        """Rotate the wrist (last arm joint) by a relative angle in degrees.
+
+        Default implementation reads current joints, adds the offset to the last
+        arm joint, and sends a joint command.
+        """
+        joints = self.get_joint_angles_rad()
+        if not joints:
+            return
+
+        # Identify the last arm joint index
+        # For a 4-DOF or 6-DOF arm, it's usually the last non-finger joint.
+        # We rely on subclasses to know `arm_dof`.
+        wrist_idx = self.arm_dof - 1
+        if wrist_idx < 0 or wrist_idx >= len(joints):
+            raise RuntimeError(f"Cannot rotate wrist: arm_dof={self.arm_dof} invalid.")
+
+        angle_rad = math.radians(angle_deg)
+        joints[wrist_idx] += angle_rad
+        self.send_joint_position_rad(joints[: self.arm_dof])
 
 
 class SafetyWrapperBackend(KinovaBackend):
@@ -239,8 +272,15 @@ class SafetyWrapperBackend(KinovaBackend):
 
         return [float(q) for q in q_candidate[: self.arm_dof]]
 
-    def step(self) -> bool:
-        return self._inner.step()
+    def solve_ik_position_only(
+        self,
+        target_pos: Sequence[float],
+        q_seed: Sequence[float] | None = None,
+    ) -> list[float]:
+        return self._inner.solve_ik_position_only(target_pos, q_seed)
+
+    def step(self, **kwargs: Any) -> bool:
+        return self._inner.step(**kwargs)
 
     def get_joint_angles_rad(self) -> list[float]:
         return self._inner.get_joint_angles_rad()
@@ -250,6 +290,9 @@ class SafetyWrapperBackend(KinovaBackend):
 
     def set_gripper_percent(self, percent: float) -> None:
         self._inner.set_gripper_percent(percent)
+
+    def rotate_wrist(self, angle_deg: float) -> None:
+        self._inner.rotate_wrist(angle_deg)
 
     def _normalize_joint_limits(
         self, joint_limits: Sequence[tuple[float, float]] | None

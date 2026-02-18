@@ -56,6 +56,14 @@ class KinovaController:
         """Solve IK for target pose; returns joint targets in radians."""
         return self._backend.solve_ik(target_pos, target_quat, q_seed)
 
+    def solve_ik_position_only(
+        self,
+        target_pos: Sequence[float],
+        q_seed: Sequence[float] | None = None,
+    ) -> list[float]:
+        """Solve IK for position only (no orientation constraint)."""
+        return self._backend.solve_ik_position_only(target_pos, q_seed)
+
     def plan_to_pose(
         self,
         target_pos: Sequence[float],
@@ -71,8 +79,11 @@ class KinovaController:
         """Backward-compatible helper that plans from a CartesianPose."""
         return self.plan_to_pose(pose.position(), pose.quaternion())
 
-    def step(self) -> bool:
-        return self._backend.step()
+    def step(self, **kwargs: Any) -> bool:
+        return self._backend.step(**kwargs)
+
+    def is_reached(self, **kwargs: Any) -> bool:
+        return self._backend.is_reached(**kwargs)
 
     def get_joint_angles_rad(self) -> list[float]:
         return self._backend.get_joint_angles_rad()
@@ -91,3 +102,7 @@ class KinovaController:
     def close_fingers(self, percent: float) -> None:
         """Close the gripper by percent in [0.0, 1.0] (1.0 = fully closed)."""
         self.set_gripper_percent(1.0 - float(percent))
+
+    def rotate_wrist(self, angle_deg: float) -> None:
+        """Rotate the wrist (last arm joint) by a relative angle in degrees."""
+        self._backend.rotate_wrist(angle_deg)

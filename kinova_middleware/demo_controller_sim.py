@@ -123,25 +123,25 @@ def main() -> int:
         controller.close_fingers(1.0)
         _run_steps(controller, 5.0)
 
-        for i in range(36):
-            if len(JOINT_TARGET_DEG) < controller.arm_dof:
-                raise ValueError(
-                    f"JOINT_TARGET_DEG expects at least {controller.arm_dof} values, "
-                    f"got {len(JOINT_TARGET_DEG)}."
-                )
-            joint_rad = [math.radians(v) for v in JOINT_TARGET_DEG[: controller.arm_dof]]
-            print(f"Moving to joint targets (deg): {JOINT_TARGET_DEG[: controller.arm_dof]}")
-            controller.send_joint_position_rad(joint_rad)
-            _run_steps(controller, 10.0, hold_seconds=0.4)
-            current_pos, current_quat = controller.get_end_effector_pose()
-            current_pos, current_quat = pose_smoother.update(current_pos, current_quat)
-            print(
-                "Current pose:",
-                f"x={current_pos[0]:.3f}, y={current_pos[1]:.3f}, z={current_pos[2]:.3f}",
-                f"qx={current_quat[0]:.3f}, qy={current_quat[1]:.3f}, qz={current_quat[2]:.3f}, qw={current_quat[3]:.3f}"
-            )
-            time.sleep(1.0)
-            JOINT_TARGET_DEG[0] += 10.0  # change first joint for next iteration
+        # for i in range(36):
+        #     if len(JOINT_TARGET_DEG) < controller.arm_dof:
+        #         raise ValueError(
+        #             f"JOINT_TARGET_DEG expects at least {controller.arm_dof} values, "
+        #             f"got {len(JOINT_TARGET_DEG)}."
+        #         )
+        #     joint_rad = [math.radians(v) for v in JOINT_TARGET_DEG[: controller.arm_dof]]
+        #     print(f"Moving to joint targets (deg): {JOINT_TARGET_DEG[: controller.arm_dof]}")
+        #     controller.send_joint_position_rad(joint_rad)
+        #     _run_steps(controller, 10.0, hold_seconds=0.4)
+        #     current_pos, current_quat = controller.get_end_effector_pose()
+        #     current_pos, current_quat = pose_smoother.update(current_pos, current_quat)
+        #     print(
+        #         "Current pose:",
+        #         f"x={current_pos[0]:.3f}, y={current_pos[1]:.3f}, z={current_pos[2]:.3f}",
+        #         f"qx={current_quat[0]:.3f}, qy={current_quat[1]:.3f}, qz={current_quat[2]:.3f}, qw={current_quat[3]:.3f}"
+        #     )
+        #     time.sleep(1.0)
+        #     JOINT_TARGET_DEG[0] += 10.0  # change first joint for next iteration
 
 
         pos, quat = controller.get_end_effector_pose()

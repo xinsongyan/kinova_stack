@@ -22,7 +22,7 @@ Kinova robot arm simulation and control stack using MuJoCo.
 2. **Install dependencies:**
 
    ```bash
-   pip install mujoco numpy==2.0.2 glfw PyOpenGL
+   pip install mujoco numpy==2.0.2 glfw PyOpenGL fastmcp
    ```
 
    > **Note:** NumPy must be `<2.1` (e.g. `2.0.2`) for compatibility with Python 3.11 and MuJoCo 3.4.0.

@@ -31,3 +31,6 @@ output/
 
 # Mujoco log files
 MUJOCO_LOG.TXT
+.env
+**/.env
+
