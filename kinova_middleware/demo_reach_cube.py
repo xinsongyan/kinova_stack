@@ -6,7 +6,7 @@ Connects to the MCP Kinova server, queries the cube's position,
 then commands the arm to reach that position using position-only IK.
 
 Usage:
-    1. Start server:  .venv/bin/mjpython kinova_middleware/mcp_kinova_server.py
+    1. Start server:  .venv/bin/mjpython kinova_middleware/backend/mcp_kinova_server.py
     2. Run demo:      python kinova_middleware/demo_reach_cube.py
 """
 import asyncio
@@ -106,7 +106,7 @@ async def main():
         print("=" * 50)
         print("  Step 5b: Rotating wrist to align …")
         print("=" * 50)
-        r = await client.call_tool("rotate_wrist", {"angle_deg": -90.0})
+        r = await client.call_tool("rotate_wrist", {"angle_deg": -140.0})
         print(pretty(r))
         print()
         check_result(r, "approach")
@@ -126,7 +126,7 @@ async def main():
         print("=" * 50)
         print("  Step 7: Closing gripper …")
         print("=" * 50)
-        r = await client.call_tool("set_gripper", {"percent": 0.55})
+        r = await client.call_tool("set_gripper", {"percent": 0.50})
         print(pretty(r))
         print()
 

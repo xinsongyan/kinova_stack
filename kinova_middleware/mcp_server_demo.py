@@ -33,9 +33,9 @@ sys.path.append(os.path.join(_ROOT_DIR, "kinova_sim"))
 sys.path.append(os.path.join(_ROOT_DIR, "kinova_api"))
 sys.path.append(os.path.join(_ROOT_DIR, "kinova_middleware"))
 
-from kinova_controller import KinovaController
-from kinova_mujoco_backend import KinovaMuJoCoBackend
-from kinova_backend import CartesianPose
+from backend.kinova_controller import KinovaController
+from backend.kinova_mujoco_backend import KinovaMuJoCoBackend
+from backend.kinova_backend import CartesianPose
 
 # ---------------------------------------------------------------------------
 # Configuration
