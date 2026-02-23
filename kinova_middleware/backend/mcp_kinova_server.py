@@ -43,6 +43,12 @@ from kinova_controller import KinovaController
 from kinova_mujoco_backend import KinovaMuJoCoBackend
 from kinova_backend import CartesianPose
 
+import sys as _sys
+_middleware_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
+if _middleware_dir not in _sys.path:
+    _sys.path.insert(0, _middleware_dir)
+from scene_selector import select_scene  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
@@ -165,10 +171,19 @@ def _stepper_loop() -> None:
 def _startup() -> None:
     global _controller
 
+    # ── Scene selection (must happen before backend creation) ─────────
+    scene_path = select_scene()
+    log.info("Selected scene: %s", os.path.basename(scene_path))
+
     log.info("Initialising Kinova controller  mode=%s  speed=%.2f rad/s", KINOVA_MODE, TARGET_SPEED)
 
     if KINOVA_MODE == "sim":
-        backend = KinovaMuJoCoBackend(viewer=True, target_speed_rad_s=TARGET_SPEED, ee_site="ee_marker")
+        backend = KinovaMuJoCoBackend(
+            model_path=scene_path,
+            viewer=True,
+            target_speed_rad_s=TARGET_SPEED,
+            ee_site="ee_marker",
+        )
     elif KINOVA_MODE == "real":
         from kinova_sdk_backend import KinovaSDKBackend
         backend = KinovaSDKBackend()
@@ -277,13 +292,18 @@ def get_joint_state() -> dict:
 def set_gripper(percent: float) -> dict:
     """Set gripper opening. 1.0 = fully open, 0.0 = fully closed.
 
-    Blocks briefly to let the gripper settle.
+    Blocks briefly to let the gripper settle.  Fingers are torque-limited
+    (forcerange in MJCF), so they will stop closing when contact force
+    reaches the cap.
 
     Args:
         percent: opening ratio in [0.0, 1.0]
 
     Returns:
         status: "ok"
+        percent: actual commanded percent
+        contact_detected: True if fingers hit something
+        max_actuator_force: peak finger force (N)
         message: description
     """
     log.info("Tool  set_gripper(%.2f)", percent)
@@ -292,9 +312,27 @@ def set_gripper(percent: float) -> dict:
     with _motion_lock:
         ctrl.set_gripper_percent(p)
         _run_until_reached(timeout_s=5.0, hold_seconds=0.3)
+
+    # Read finger forces after settling
+    try:
+        force_info = ctrl.get_finger_forces()
+        contact = force_info.get("contact_detected", False)
+        max_force = force_info.get("max_abs_force", 0.0)
+    except Exception:
+        contact = False
+        max_force = 0.0
+
     msg = f"Gripper set to {p*100:.0f}%."
+    if contact:
+        msg += f" Contact detected (F={max_force:.2f}N)."
     log.info("  → %s", msg)
-    return {"status": "ok", "message": msg}
+    return {
+        "status": "ok",
+        "percent": p,
+        "contact_detected": contact,
+        "max_actuator_force": max_force,
+        "message": msg,
+    }
 
 
 # ── Tool 5: move_joints ──────────────────────────────────────────────────
@@ -479,6 +517,8 @@ def get_object_pose(body_name: str) -> dict:
     Returns:
         body_name: the queried body name
         position: {x, y, z}  (metres)
+        size: list of geom size parameters (e.g. [radius, half_height] for cylinder)
+        geom_type: string name of the geom type (e.g. "cylinder", "box", "sphere")
         quaternion: {qx, qy, qz, qw}
     """
     ctrl = _get_controller()
@@ -495,25 +535,171 @@ def get_object_pose(body_name: str) -> dict:
     model = env.model
     data = env.data
 
+    # Helper to extract body info
+    def _get_body_info(bid):
+        bname = _mj.mj_id2name(model, _mj.mjtObj.mjOBJ_BODY, bid)
+        
+        with _physics_lock:
+            pos = data.xpos[bid].copy()
+            quat_wxyz = data.xquat[bid].copy()
+
+        _GEOM_TYPE_NAMES = {
+            0: "plane", 1: "hfield", 2: "sphere", 3: "capsule",
+            4: "ellipsoid", 5: "cylinder", 6: "box", 7: "mesh",
+        }
+        geom_size = []
+        geom_type_str = "unknown"
+        
+        for gid in range(model.ngeom):
+            if model.geom_bodyid[gid] == bid:
+                geom_type_int = int(model.geom_type[gid])
+                geom_type_str = _GEOM_TYPE_NAMES.get(geom_type_int, f"type_{geom_type_int}")
+                raw_size = model.geom_size[gid].copy()
+                if geom_type_str == "cylinder":
+                    geom_size = [float(raw_size[0]), float(raw_size[1])]
+                elif geom_type_str == "box":
+                    geom_size = [float(raw_size[0]), float(raw_size[1]), float(raw_size[2])]
+                elif geom_type_str == "sphere":
+                    geom_size = [float(raw_size[0])]
+                else:
+                    geom_size = [float(v) for v in raw_size]
+                break
+        
+        return {
+            "body_name": bname,
+            "position": {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2])},
+            "size": geom_size,
+            "geom_type": geom_type_str,
+            "quaternion": {
+                "qx": float(quat_wxyz[1]), "qy": float(quat_wxyz[2]), 
+                "qz": float(quat_wxyz[3]), "qw": float(quat_wxyz[0])
+            }
+        }
+
+    # Handle "all" request
+    if body_name == "all":
+        objects = []
+        for bid in range(model.nbody):
+            jnt_adr = model.body_jntadr[bid]
+            jnt_num = model.body_jntnum[bid]
+            # Check for freejoint (mjJNT_FREE = 3)
+            if jnt_num > 0 and model.jnt_type[jnt_adr] == _mj.mjtJoint.mjJNT_FREE:
+                objects.append(_get_body_info(bid))
+        return {"status": "ok", "objects": objects}
+
+    # Handle specific body request
     body_id = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_BODY, body_name)
     if body_id < 0:
         return {"status": "error", "message": f"Body '{body_name}' not found in model."}
 
-    with _physics_lock:
-        pos = data.xpos[body_id].copy()
-        quat_wxyz = data.xquat[body_id].copy()
+    return _get_body_info(body_id)
 
-    # Convert MuJoCo wxyz → xyzw
-    return {
-        "body_name": body_name,
-        "position": {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2])},
-        "quaternion": {
-            "qx": float(quat_wxyz[1]),
-            "qy": float(quat_wxyz[2]),
-            "qz": float(quat_wxyz[3]),
-            "qw": float(quat_wxyz[0]),
-        },
-    }
+
+# ---------------------------------------------------------------------------
+# Logic extraction helpers & tools
+# ---------------------------------------------------------------------------
+
+def _quat_rotate(q: list[float], v: list[float]) -> list[float]:
+    """Rotate vector v by quaternion q = (qx, qy, qz, qw) using q * v * q^-1.
+    
+    internal helper.
+    """
+    qx, qy, qz, qw = q
+    # quaternion × vector (treat v as pure quaternion 0, v)
+    t = [
+        2.0 * (qy * v[2] - qz * v[1]),
+        2.0 * (qz * v[0] - qx * v[2]),
+        2.0 * (qx * v[1] - qy * v[0]),
+    ]
+    return [
+        v[0] + qw * t[0] + qy * t[2] - qz * t[1],
+        v[1] + qw * t[1] + qz * t[0] - qx * t[2],
+        v[2] + qw * t[2] + qx * t[1] - qy * t[0],
+    ]
+
+
+@mcp.tool()
+def compute_grasp_height(geom_type: str, size: list[float], quat_xyzw: list[float]) -> dict:
+    """Compute the height of the object's top surface above its body origin.
+
+    For a cylinder: rotates the local Z-axis (half_height) by the body quaternion,
+    then takes the world-Z component of that vector as the vertical extent.
+    Also accounts for the radius contributing to Z when tilted.
+
+    Args:
+        geom_type: "cylinder", "box", or "sphere"
+        size: dimensions (e.g. [radius, half_height] for cylinder)
+        quat_xyzw: [qx, qy, qz, qw]
+
+    Returns:
+        top_height: float (metres)
+        status: "ok" or "error"
+        message: error details if any
+    """
+    valid_types = ["cylinder", "box", "sphere"]
+    if geom_type not in valid_types:
+        return {
+            "status": "error",
+            "message": f"Invalid geom_type '{geom_type}'. Accepted types: {', '.join(valid_types)}",
+            "top_height": 0.0,
+        }
+
+    qx, qy, qz, qw = quat_xyzw
+    top_z = 0.0
+
+    if geom_type == "cylinder":
+        if len(size) < 2:
+             return {"status": "error", "message": "Cylinder size must be [radius, half_height]", "top_height": 0.0}
+        radius, half_height = size[0], size[1]
+        # Local cylinder axis is along Z → [0, 0, half_height]
+        axis_world = _quat_rotate([qx, qy, qz, qw], [0, 0, half_height])
+        # Local radius contributes along X and Y
+        rx = _quat_rotate([qx, qy, qz, qw], [radius, 0, 0])
+        ry = _quat_rotate([qx, qy, qz, qw], [0, radius, 0])
+        top_z = abs(axis_world[2]) + max(abs(rx[2]), abs(ry[2]))
+
+    elif geom_type == "box":
+        if len(size) < 3:
+             return {"status": "error", "message": "Box size must be [hx, hy, hz]", "top_height": 0.0}
+        hx, hy, hz = size[0], size[1], size[2]
+        vx = _quat_rotate([qx, qy, qz, qw], [hx, 0, 0])
+        vy = _quat_rotate([qx, qy, qz, qw], [0, hy, 0])
+        vz = _quat_rotate([qx, qy, qz, qw], [0, 0, hz])
+        top_z = abs(vx[2]) + abs(vy[2]) + abs(vz[2])
+
+    elif geom_type == "sphere":
+        if len(size) < 1:
+             return {"status": "error", "message": "Sphere size must be [radius]", "top_height": 0.0}
+        top_z = size[0]
+
+    return {"status": "ok", "top_height": top_z}
+
+
+@mcp.tool()
+def compute_wrist_alignment(obj_quat_xyzw: list[float], ee_quat_xyzw: list[float]) -> dict:
+    """Compute the wrist rotation needed to align the EE X-axis with the object's long axis.
+
+    Args:
+        obj_quat_xyzw: object quaternion [qx, qy, qz, qw]
+        ee_quat_xyzw:  end-effector quaternion [qx, qy, qz, qw]
+
+    Returns:
+        angle_deg: signed rotation (degrees)
+        status: "ok"
+    """
+    # Cylinder long axis = local Z rotated by object quaternion
+    cyl_axis = _quat_rotate(obj_quat_xyzw, [0, 0, 1])
+    cyl_angle = math.atan2(cyl_axis[1], cyl_axis[0])
+
+    # EE X-axis in world frame
+    ee_x = _quat_rotate(ee_quat_xyzw, [1, 0, 0])
+    ee_x_angle = math.atan2(ee_x[1], ee_x[0])
+
+    # Signed difference, wrapped to [-pi, pi]
+    diff_rad = cyl_angle - ee_x_angle
+    diff_rad = (diff_rad + math.pi) % (2 * math.pi) - math.pi
+
+    return {"status": "ok", "angle_deg": math.degrees(diff_rad)}
 
 
 # ---------------------------------------------------------------------------

@@ -12,11 +12,12 @@ Usage:
 import asyncio
 import json
 from fastmcp import Client
+from time import sleep
 
 SERVER_URL = "http://127.0.0.1:8000/mcp"
 
-# Height offset so the gripper arrives just above the cube, not crashing into it
-Z_OFFSET = 0.06  # metres above the cube centre
+# Small clearance above the computed grasp centre (metres)
+GRASP_CLEARANCE = 0.005
 
 # Position-only quaternion — triggers position-only IK on the server
 POS_ONLY_QUAT = [0.0, 0.0, 0.0, 0.0]
@@ -46,118 +47,200 @@ def check_result(result, step_name: str):
     return data
 
 
+async def grab_object(client, body_name: str):
+    print(f"\n{'='*60}")
+    print(f"  STARTING SEQUENCE FOR: {body_name}")
+    print(f"{'='*60}\n")
+
+    # 1. Home the arm
+    print("  Step 1: Homing arm …")
+    await client.call_tool("move_home")
+
+    # 2. Open gripper
+    print("  Step 2: Opening gripper …")
+    await client.call_tool("set_gripper", {"percent": 0.9})
+
+    # 3. Get Pose & Compute Grasp Height
+    print(f"  Step 3: Querying {body_name} pose …")
+    r = await client.call_tool("get_object_pose", {"body_name": body_name})
+    data = r.structured_content or {}
+    if data.get("status") == "error":
+        print(f"  ⚠ Skipped {body_name}: {data.get('message')}")
+        return
+
+    pos = data.get("position", {})
+    cx, cy, cz = pos.get("x", 0.0), pos.get("y", 0.0), pos.get("z", 0.0)
+    geom_type = data.get("geom_type", "unknown")
+    size = data.get("size", [])
+    quat = data.get("quaternion", {})
+    quat_xyzw = [quat.get("qx", 0), quat.get("qy", 0), quat.get("qz", 0), quat.get("qw", 1)]
+
+    r_height = await client.call_tool("compute_grasp_height", {
+        "geom_type": geom_type, "size": size, "quat_xyzw": quat_xyzw
+    })
+    h_data = r_height.structured_content or {}
+    top_height = h_data.get("top_height", 0.0)
+    grasp_z = top_height + GRASP_CLEARANCE
+
+    print(f"  -> Found {body_name} at ({cx:.3f}, {cy:.3f}, {cz:.3f})")
+    print(f"  -> Grasp z-offset: {grasp_z:.4f}m")
+
+    # 3b. Face the Object (Critical for reachability)
+    import math
+
+    # Robot base position in world XY (from MJCF: base is at origin)
+    BASE_X, BASE_Y = 0.0, 0.0
+
+    # Direction vector from base to object (projected onto XY plane)
+    dx = cx - BASE_X
+    dy = cy - BASE_Y
+
+    # World-frame yaw angle to the object
+    theta_world = math.atan2(dy, dx)
+
+    # Convert to joint_1 frame
+    joint_1_target = -theta_world
+
+    # Wrap to [-π, π] to stay within joint limits
+    joint_1_target = math.atan2(math.sin(joint_1_target), math.cos(joint_1_target))
+
+    print(f"  Step 3b: Facing object  θ_world={math.degrees(theta_world):.1f}°  →  J1={math.degrees(joint_1_target):.1f}°")
+
+    # Get current joints (Home)
+    r_joints = await client.call_tool("get_joint_state")
+    full_q = r_joints.structured_content.get("q_rad", [])
+
+    # Only the first 4 values are arm joints; the rest are fingers.
+    arm_q = full_q[:4]
+    arm_q[0] = joint_1_target
+
+    # Move joints (rotate base to face object)
+    r_face = await client.call_tool("move_joints", {"q": arm_q, "units": "rad"})
+    check_result(r_face, "Face Object")
+
+    # 4. Approach
+    approach_pos = [cx, cy, cz + grasp_z + 0.15] # 15cm approach
+    print(f"  Step 4: Approaching {approach_pos}")
+    
+    # Get current joints to seed the IK (keeps elbow up)
+    r_joints = await client.call_tool("get_joint_state")
+    
+    # FIX: "Expected at least 10 seed joints, got 4"
+    # The IK solver needs the FULL state vector (including fingers) as seed.
+    full_q = r_joints.structured_content.get("q_rad", [])
+    
+    r_approach = await client.call_tool("move_pose", {
+        "target_pos": approach_pos, 
+        "target_quat": POS_ONLY_QUAT,
+        "seed_q_rad": full_q 
+    })
+    check_result(r_approach, "Approach")
+
+    # 5. Align Wrist
+    print("  Step 5: Aligning wrist …")
+    r_ee = await client.call_tool("get_end_effector_pose")
+    ee_q = r_ee.structured_content.get("quaternion", {})
+    ee_quat = [ee_q.get("qx", 0), ee_q.get("qy", 0), ee_q.get("qz", 0), ee_q.get("qw", 1)]
+    
+    r_align = await client.call_tool("compute_wrist_alignment", {
+        "obj_quat_xyzw": quat_xyzw, "ee_quat_xyzw": ee_quat
+    })
+    wrist_angle = r_align.structured_content.get("angle_deg", 0.0)
+    print(f"    -> Rotating wrist by {wrist_angle:.2f} deg")
+    r_wrist = await client.call_tool("rotate_wrist", {"angle_deg": wrist_angle})
+    check_result(r_wrist, "Align Wrist")
+
+    # 6. Descend
+    target_pos = [cx, cy, cz + grasp_z]
+    print(f"  Step 6: Descending to {target_pos} …")
+    
+    # Get current joints (now with aligned wrist) to seed IK
+    r_joints = await client.call_tool("get_joint_state")
+    current_q = r_joints.structured_content.get("q_rad", [])
+    
+    r_descend = await client.call_tool("move_pose", {
+        "target_pos": target_pos, 
+        "target_quat": POS_ONLY_QUAT,
+        "seed_q_rad": current_q
+    })
+    check_result(r_descend, "Descend")
+
+    # 7. Grab
+    print("  Step 7: Grasping …")
+    await client.call_tool("set_gripper", {"percent": 0.5})
+
+    # 8. Lift
+    lift_pos = [cx, cy, cz + grasp_z + 0.20]
+    print("  Step 8: Lifting …")
+    
+    # Get current joints (now with closed gripper) to seed IK
+    r_joints = await client.call_tool("get_joint_state")
+    current_q = r_joints.structured_content.get("q_rad", [])
+    
+    r_lift = await client.call_tool("move_pose", {
+        "target_pos": lift_pos, 
+        "target_quat": POS_ONLY_QUAT,
+        "seed_q_rad": current_q
+    })
+    check_result(r_lift, "Lift")
+
+    print(f"  ✓ {body_name} sequence complete.")
+
+
+def check_result(result, step_name: str):
+    """Helper to verify tool result and print status."""
+    content = result.structured_content or {}
+    status = content.get("status", "unknown")
+    if status != "ok":
+        print(f"  ⚠ {step_name} FAILED: {content.get('message')}")
+    else:
+        # Optional: Print error metrics if available
+        pos_err = content.get("pos_err")
+        rot_err = content.get("rot_err")
+        err_str = []
+        if pos_err is not None: err_str.append(f"pos_err={pos_err:.4f}m")
+        if rot_err is not None: err_str.append(f"rot_err={rot_err:.4f}rad")
+        if err_str:
+            print(f"    ✓ {step_name} OK ({', '.join(err_str)})")
+        else:
+            print(f"    ✓ {step_name} OK")
+
+
 async def main():
     async with Client(SERVER_URL) as client:
+        # 0. Discover Objects
+        print("=" * 50)
+        print("  Step 0: Discovering objects …")
+        print("=" * 50)
+        r = await client.call_tool("get_object_pose", {"body_name": "all"})
+        data = r.structured_content or {}
+        if data.get("status") == "error":
+             print(f"Error discovering objects: {data.get('message')}")
+             return
+             
+        objects_list = data.get("objects", [])
+        print(f"  Found {len(objects_list)} movable objects:")
+        for obj in objects_list:
+            print(f"    - {obj['body_name']} ({obj['geom_type']}): size={obj['size']} pos={obj['position']} quat={obj['quaternion']}")
+        
+        # Sort objects by some criteria? Or just iterate.
+        # Let's just iterate through the names.
+        target_names = [obj['body_name'] for obj in objects_list]
+        
+        # Filter if needed (e.g. exclude some known non-targets if any appear). 
+        # But our filter in server (freejoint) should be good.
 
-        # 1. Home the arm
-        print("=" * 50)
-        print("  Step 1: Homing arm …")
-        print("=" * 50)
-        r = await client.call_tool("move_home")
-        print(pretty(r))
-        print()
+        for body_name in target_names:
+            await grab_object(client, body_name)
+            
+            # Drop/Reset
+            print("  -> Dropping object …")
+            await client.call_tool("set_gripper", {"percent": 0.9})
+            await asyncio.sleep(1.0) # wait for drop
 
-        # 2. Open gripper
-        print("=" * 50)
-        print("  Step 2: Opening gripper …")
-        print("=" * 50)
-        r = await client.call_tool("set_gripper", {"percent": 0.9})
-        print(pretty(r))
-        print()
-
-        # 3. Get the cube's position
-        print("=" * 50)
-        print("  Step 3: Querying cube position …")
-        print("=" * 50)
-        r = await client.call_tool("get_object_pose", {"body_name": "cube"})
-        cube_data = r.structured_content or {}
-        print(pretty(r))
-        print()
-
-        cube_pos = cube_data.get("position", {})
-        cx = cube_pos.get("x", 0)
-        cy = cube_pos.get("y", 0)
-        cz = cube_pos.get("z", 0)
-        print(f"  Cube at: x={cx:.4f}  y={cy:.4f}  z={cz:.4f}")
-
-        # 4. Get current EE pose for reference
-        print()
-        print("=" * 50)
-        print("  Step 4: Reading current EE pose …")
-        print("=" * 50)
-        r = await client.call_tool("get_end_effector_pose")
-        ee_data = r.structured_content or {}
-        print(pretty(r))
-        print()
-
-        # 5. Move above the cube (approach from above)
-        approach_pos = [cx, cy, cz + Z_OFFSET + 0.08]
-        print("=" * 50)
-        print(f"  Step 5: Approaching above cube → {[f'{v:.4f}' for v in approach_pos]}")
-        print("=" * 50)
-        r = await client.call_tool("move_pose", {
-            "target_pos": approach_pos,
-            "target_quat": POS_ONLY_QUAT,
-        })
-        print(pretty(r))
-        print()
-
-        # 5b. Rotate wrist to align with rectangle
-        print("=" * 50)
-        print("  Step 5b: Rotating wrist to align …")
-        print("=" * 50)
-        r = await client.call_tool("rotate_wrist", {"angle_deg": -140.0})
-        print(pretty(r))
-        print()
-        check_result(r, "approach")
-
-        # 6. Descend to the cube
-        target_pos = [cx, cy, cz + Z_OFFSET]
-        print("=" * 50)
-        print(f"  Step 6: Descending to cube → {[f'{v:.4f}' for v in target_pos]}")
-        print("=" * 50)
-        r = await client.call_tool("move_pose", {
-            "target_pos": target_pos,
-            "target_quat": POS_ONLY_QUAT,
-        })
-        check_result(r, "descend")
-
-        # 7. Close gripper (grab)
-        print("=" * 50)
-        print("  Step 7: Closing gripper …")
-        print("=" * 50)
-        r = await client.call_tool("set_gripper", {"percent": 0.50})
-        print(pretty(r))
-        print()
-
-        # 8. Lift up
-        lift_pos = [cx, cy, cz + Z_OFFSET + 0.15]
-        print("=" * 50)
-        print(f"  Step 8: Lifting → {[f'{v:.4f}' for v in lift_pos]}")
-        print("=" * 50)
-        r = await client.call_tool("move_pose", {
-            "target_pos": lift_pos,
-            "target_quat": POS_ONLY_QUAT,
-        })
-        check_result(r, "lift")
-
-        # 9. Check where the cube ended up
-        print("=" * 50)
-        print("  Step 9: Final cube position:")
-        print("=" * 50)
-        r = await client.call_tool("get_object_pose", {"body_name": "cube"})
-        print(pretty(r))
-        print()
-
-        # 10. Final EE pose
-        print("=" * 50)
-        print("  Step 10: Final EE pose:")
-        print("=" * 50)
-        r = await client.call_tool("get_end_effector_pose")
-        print(pretty(r))
-        print()
-
-        print("✅ Reach-cube demo complete!")
+        print("\n✅ All discovered objects handled!")
+        # Final home
+        await client.call_tool("move_home")
 
 
 if __name__ == "__main__":

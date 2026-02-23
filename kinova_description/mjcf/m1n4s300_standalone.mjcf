@@ -1,12 +1,14 @@
 <mujoco model="m1n4s300">
   <option timestep="0.0002"/>
-  <compiler angle="radian" meshdir="../meshes/" balanceinertia="true"/>
+  <compiler angle="radian" balanceinertia="true"/>
 
   <asset>
     <material name="white" rgba="1 1 1 1"/>
     <material name="black" rgba="0.2 0.2 0.2 1"/>
     <material name="grey" rgba="0.792157 0.819608 0.933333 1"/>
     <material name="red_cube" rgba="0.9 0.15 0.15 1" specular="0.4" shininess="0.3"/>
+    <material name="blue_box" rgba="0.15 0.15 0.9 1" specular="0.4" shininess="0.3"/>
+    <material name="green_sphere" rgba="0.15 0.9 0.15 1" specular="0.4" shininess="0.3"/>
     <mesh name="base" content_type="model/stl" file="base.STL"/>
     <mesh name="shoulder" content_type="model/stl" file="shoulder.STL"/>
     <mesh name="ring_big" content_type="model/stl" file="ring_big.STL"/>
@@ -22,21 +24,6 @@
     <!-- Ground plane -->
     <geom name="ground" type="plane" size="2 2 0.01" rgba="0.4 0.4 0.4 1"
           contype="1" conaffinity="1" friction="1 0.005 0.0001"/>
-
-    <!-- MOVABLE CUBE: free body the arm can push / pick up -->
-    <body name="cube" pos="0.15 -0.35 0.031" quat="0.70710678 0 0.70710678 0">
-      <freejoint name="can_joint"/>
-      <inertial pos="0 0 0" mass="0.05" diaginertia="0.0000167 0.0000167 0.00001"/>
-      <geom name="can_geom"
-            type="cylinder"
-            size="0.03 0.09"
-            material="red_cube"
-        contype="1"
-        conaffinity="1"
-        friction="1 0.02 0.001"
-        margin="0.002"
-        condim="3"/>
-    </body>
 
     <geom type="mesh" contype="0" conaffinity="0" group="1" density="0" mesh="base" material="black"/>
     <geom type="mesh" mesh="base" material="black"/>
@@ -61,9 +48,20 @@
           <body name="link_4" pos="0 0.1231 -0.0086" quat="0 0 -0.707107 0.707107">
             <inertial pos="0 0 -0.06" quat="0.5 0.5 -0.5 0.5" mass="0.78" diaginertia="0.000624 0.000370499 0.000370499"/>
             <joint name="joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.1"/>
-            <!-- DEBUG: green sphere marking the EE reference point (adjust pos to calibrate) -->
+            <!-- EE reference point: green sphere + RGB rotation arrows -->
             <site name="ee_marker" pos="0 0 -0.13" size="0.012"
-                  rgba="0.1 1.0 0.1 0.0" type="sphere"/>
+                  rgba="0.1 1.0 0.1 0.6" type="sphere"/>
+            <!-- X-axis (red) -->
+            <site name="ee_axis_x" pos="0.03 0 -0.13" size="0.003 0.03"
+                  rgba="1 0 0 0.8" type="cylinder"
+                  quat="0.707107 0 0.707107 0"/>
+            <!-- Y-axis (green) -->
+            <site name="ee_axis_y" pos="0 0.03 -0.13" size="0.003 0.03"
+                  rgba="0 1 0 0.8" type="cylinder"
+                  quat="0.707107 -0.707107 0 0"/>
+            <!-- Z-axis (blue) -->
+            <site name="ee_axis_z" pos="0 0 -0.10" size="0.003 0.03"
+                  rgba="0 0 1 0.8" type="cylinder"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="hand_2finger" material="black"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_small" material="grey"/>
             <geom type="mesh"  mesh="hand_2finger" material="black"/>
@@ -76,7 +74,7 @@
                 <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
                 <joint name="joint_finger_tip_1" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_distal" material="grey"/>
-                <geom type="mesh"  mesh="finger_distal" material="grey"/>
+                <geom type="mesh"  mesh="finger_distal" material="grey" friction="1 0.1 0.01"/>
               </body>
             </body>
             <body name="link_finger_2" pos="0.02226 -0.02707 -0.11482" quat="0.659653 -0.37146 0.601679 -0.254671">
@@ -88,7 +86,7 @@
                 <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
                 <joint name="joint_finger_tip_2" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_distal" material="grey"/>
-                <geom type="mesh"  mesh="finger_distal" material="grey"/>
+                <geom type="mesh"  mesh="finger_distal" material="grey" friction="1 0.1 0.01"/>
               </body>
             </body>
             <body name="link_finger_3" pos="-0.02226 -0.02707 -0.11482" quat="0.601679 -0.254671 0.659653 -0.37146">
@@ -100,7 +98,7 @@
                 <inertial pos="0.022 0 0" mass="0.01" diaginertia="7.89997e-07 7.89997e-07 8e-08"/>
                 <joint name="joint_finger_tip_3" pos="0 0 0" axis="0 0 1" range="0 2" actuatorfrcrange="-2 2" damping="0.01"/>
                 <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="finger_distal" material="grey"/>
-                <geom type="mesh"  mesh="finger_distal" material="grey"/>
+                <geom type="mesh"  mesh="finger_distal" material="grey" friction="1 0.1 0.01"/>
               </body>
             </body>
           </body>
@@ -114,23 +112,12 @@
   <motor name="motor_joint_2" joint="joint_2" gear="1"/>
   <motor name="motor_joint_3" joint="joint_3" gear="1"/>
   <motor name="motor_joint_4" joint="joint_4" gear="1"/>
-  <motor name="motor_joint_finger_1" joint="joint_finger_1" gear="1"/>
-  <motor name="motor_joint_finger_tip_1" joint="joint_finger_tip_1" gear="1"/>
-  <motor name="motor_joint_finger_2" joint="joint_finger_2" gear="1"/>
-  <motor name="motor_joint_finger_tip_2" joint="joint_finger_tip_2" gear="1"/>
-  <motor name="motor_joint_finger_3" joint="joint_finger_3" gear="1"/>
-  <motor name="motor_joint_finger_tip_3" joint="joint_finger_tip_3" gear="1"/>
+  <motor name="motor_joint_finger_1" joint="joint_finger_1" gear="1" forcelimited="true" forcerange="-2 2"/>
+  <motor name="motor_joint_finger_tip_1" joint="joint_finger_tip_1" gear="1" forcelimited="true" forcerange="-2 2"/>
+  <motor name="motor_joint_finger_2" joint="joint_finger_2" gear="1" forcelimited="true" forcerange="-2 2"/>
+  <motor name="motor_joint_finger_tip_2" joint="joint_finger_tip_2" gear="1" forcelimited="true" forcerange="-2 2"/>
+  <motor name="motor_joint_finger_3" joint="joint_finger_3" gear="1" forcelimited="true" forcerange="-2 2"/>
+  <motor name="motor_joint_finger_tip_3" joint="joint_finger_tip_3" gear="1" forcelimited="true" forcerange="-2 2"/>
 </actuator>
-
-<keyframe>
-  <key name="home"
-       qpos="0.15 -0.35 0.02   0.70710678 0 0.70710678 0   1.48353 3.22886 4.90438 0 0 0 0 0 0 0"/>
-
-  <key name="folded"
-       qpos="0.15 -0.35 0.02   0.70710678 0 0.70710678 0   1.57080 4.79966 5.58505 0 0 0 0 0 0 0"/>
-
-  <key name="extended"
-       qpos="0.15 -0.35 0.02   0.70710678 0 0.70710678 0   1.57080 3.1415 3.1415 0 0 0 0 0 0 0"/>
-</keyframe>
 
 </mujoco>

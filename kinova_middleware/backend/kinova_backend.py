@@ -146,6 +146,10 @@ class KinovaBackend(ABC):
     def set_gripper_percent(self, percent: float) -> None:
         """Control gripper opening as a percentage in [0.0, 1.0]."""
 
+    def get_finger_forces(self) -> dict:
+        """Read current finger actuator forces. Override in sim backends."""
+        return {"forces": [], "max_abs_force": 0.0, "contact_detected": False}
+
     def rotate_wrist(self, angle_deg: float) -> None:
         """Rotate the wrist (last arm joint) by a relative angle in degrees.
 
@@ -290,6 +294,9 @@ class SafetyWrapperBackend(KinovaBackend):
 
     def set_gripper_percent(self, percent: float) -> None:
         self._inner.set_gripper_percent(percent)
+
+    def get_finger_forces(self) -> dict:
+        return self._inner.get_finger_forces()
 
     def rotate_wrist(self, angle_deg: float) -> None:
         self._inner.rotate_wrist(angle_deg)

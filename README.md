@@ -60,9 +60,3 @@ Kinova robot arm simulation and control stack using MuJoCo.
 | `kinova_firmware/` | Firmware-related files |
 | `kinova-api-python/` | Kinova Python API bindings |
 
-## Tasks
-
-- [x] Add `m1n4s300_standalone.urdf`
-- [ ] Add actuators
-- [ ] Modify the URDF to have 4 DOF MICO
-- [ ] Add gripper descriptions

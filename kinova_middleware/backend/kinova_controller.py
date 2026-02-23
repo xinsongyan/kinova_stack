@@ -95,6 +95,10 @@ class KinovaController:
         """Set gripper opening percentage in [0.0, 1.0]."""
         self._backend.set_gripper_percent(percent)
 
+    def get_finger_forces(self) -> dict:
+        """Read current actuator forces for finger joints."""
+        return self._backend.get_finger_forces()
+
     def open_fingers(self, percent: float) -> None:
         """Open the gripper by percent in [0.0, 1.0] (1.0 = fully open)."""
         self.set_gripper_percent(percent)

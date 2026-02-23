@@ -289,6 +289,39 @@ class KinovaMuJoCoBackend(KinovaBackend):
         if self._q_target is None:
             self._q_target = self._q_target_desired.copy()
 
+    def get_finger_forces(self) -> dict:
+        """Read current actuator forces for finger joints.
+
+        Returns:
+            dict with 'forces' (list[float]), 'max_abs_force' (float),
+            and 'contact_detected' (bool) based on force threshold.
+        """
+        env = self._require_env()
+        F_MAX = 2.0  # must match MJCF forcerange
+        CONTACT_THRESHOLD = 0.8 * F_MAX
+
+        forces = []
+        for idx in self._finger_indices:
+            act_id = self._actuator_ids[idx]
+            forces.append(float(env.data.actuator_force[act_id]))
+
+        max_abs = max(abs(f) for f in forces) if forces else 0.0
+
+        # Contact detected when force is high AND finger velocity is near zero
+        finger_vels = []
+        for idx in self._finger_indices:
+            vel_adr = self._qvel_adr[idx]
+            finger_vels.append(abs(float(env.data.qvel[vel_adr])))
+        max_vel = max(finger_vels) if finger_vels else 0.0
+
+        contact_detected = max_abs >= CONTACT_THRESHOLD and max_vel < 0.1
+
+        return {
+            "forces": forces,
+            "max_abs_force": round(max_abs, 4),
+            "contact_detected": contact_detected,
+        }
+
     def solve_ik(
         self,
         target_pos: Sequence[float],

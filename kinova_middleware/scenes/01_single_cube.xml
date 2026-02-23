@@ -1,0 +1,24 @@
+<!-- Scene 01: Single Cube
+     One red cube on the table for basic pick-and-place. -->
+<mujoco model="scene_single_cube">
+  <compiler meshdir="../../kinova_description/meshes/" angle="radian" balanceinertia="true"/>
+  <include file="../../kinova_description/mjcf/m1n4s300_standalone.mjcf"/>
+
+  <worldbody>
+    <body name="cube_1" pos="0.2 -0.2 0.03" quat="1 0 0 0">
+      <freejoint name="cube_1_joint"/>
+      <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
+      <geom name="cube_1_geom"
+            type="box" size="0.03 0.03 0.03"
+            material="red_cube"
+            contype="1" conaffinity="1" friction="1 0.02 0.001" margin="0.002" condim="3"/>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <!-- qpos: 10 robot joints, then 7 cube_1 freejoint -->
+    <key name="home"
+      qpos="1.48353 3.22886 4.90438 0  0 0  0 0  0 0
+            0.2 -0.2 0.03  1 0 0 0"/>
+  </keyframe>
+</mujoco>

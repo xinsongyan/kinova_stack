@@ -19,28 +19,31 @@ from fastmcp import Client
 
 # Configuration
 SERVER_URL = "http://127.0.0.1:8000/mcp"
-MODEL_NAME = "gpt-4o"  # Use a capable model
+MODEL_NAME = "gpt-4o-mini"  # Use a capable model
 
 # Tool Definitions will be loaded dynamically
 TOOLS = []
 
 SYSTEM_PROMPT = """
 You are a robotic arm control agent. You control a 4-DOF Kinova Gen3 arm with a 2-finger gripper.
-Your goal is to pick up the red cylinder (named 'cube' in the system) and lift it.
+Your goal is to pick up the "red_cylinder" (blue box and green sphere are also present).
 
 STANDARD OPERATING PROCEDURE:
 1. **Home**: Call `move_home()` to reset the arm.
 2. **Open Gripper**: Call `set_gripper(percent=0.9)` to open fingers.
-3. **Locate**: Call `get_object_pose(body_name='cube')` to get the target position (x, y, z).
-4. **Approach**: Call `move_pose` to move to `[x, y, z + 0.14]` (14cm above object).
-   - Use `target_quat=[0.0, 0.0, 0.0, 0.0]` (w,x,y,z) for vertical alignment.
-5. **Align Wrist**: Call `rotate_wrist(angle_deg=-140.0)` to align the gripper fingers with the cylinder.
-6. **Descend**: Call `move_pose` to move to `[x, y, z + 0.06]` (at proper grasping height).
+3. **Plan Grasp**: Call `plan_grasp(body_name='red_cylinder')`.
+   - This tool returns `approach_pose`, `grasp_pose`, and `wrist_angle_deg`.
+4. **Approach**: Call `move_pose` using the `approach_pose` from step 3.
    - Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
-7. **Grasp**: Call `set_gripper(percent=0.5)` to close fingers firmly.
-8. **Lift**: Call `move_pose` to move to `[x, y, z + 0.21]` to lift the object.
+5. **Align Wrist**: Call `rotate_wrist` using `wrist_angle_deg` from step 3.
+6. **Descend**: Call `move_pose` using the `grasp_pose` from step 3.
+   - Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
+7. **Grasp**: Call `set_gripper(percent=0.5)` to close fingers.
+8. **Lift**: Call `move_pose` using the current x,y but z + 0.20.
 
-Always check the output of tools. If a tool fails, retry or adjust.
+Output policy:
+- Prefer tool calls over chat.
+- Do not invent values; compute from tool results.
 """
 
 async def load_tools_from_mcp(mcp_client):
@@ -140,7 +143,7 @@ async def main():
                             
                             # Log success (truncate for readability)
                             log_msg = content_str.replace('\n', ' ')
-                            print(f"   → Result: {log_msg[:100]}..." if len(log_msg) > 100 else f"   → Result: {log_msg}")
+                            print(f"   → Result: {log_msg}")
 
                         except Exception as e:
                             content_str = f"Error executing tool: {str(e)}"
