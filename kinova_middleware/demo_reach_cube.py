@@ -167,7 +167,7 @@ async def grab_object(client, body_name: str):
 
     # 7. Grab
     print("  Step 7: Grasping …")
-    await client.call_tool("set_gripper", {"percent": 0.5})
+    await client.call_tool("set_gripper", {"percent": 0.6})
 
     # 8. Lift
     lift_pos = [cx, cy, cz + grasp_z + 0.20]
@@ -177,12 +177,27 @@ async def grab_object(client, body_name: str):
     r_joints = await client.call_tool("get_joint_state")
     current_q = r_joints.structured_content.get("q_rad", [])
     
+    # Get current wrist orientation to maintain it perfectly vertical during lift
+    r_ee_lift = await client.call_tool("get_end_effector_pose")
+    ee_lift_q = r_ee_lift.structured_content.get("quaternion", {})
+    lift_quat = [
+        ee_lift_q.get("qx", 0), 
+        ee_lift_q.get("qy", 0), 
+        ee_lift_q.get("qz", 0), 
+        ee_lift_q.get("qw", 1)
+    ]
+    
     r_lift = await client.call_tool("move_pose", {
         "target_pos": lift_pos, 
-        "target_quat": POS_ONLY_QUAT,
+        "target_quat": lift_quat, # Maintain exact grasp orientation
         "seed_q_rad": current_q
     })
     check_result(r_lift, "Lift")
+    sleep(2) # Give viewer a moment to show the success before dropping
+
+    # 9. Drop
+    print("  Step 9: Dropping object …")
+    await client.call_tool("set_gripper", {"percent": 0.9})
 
     print(f"  ✓ {body_name} sequence complete.")
 

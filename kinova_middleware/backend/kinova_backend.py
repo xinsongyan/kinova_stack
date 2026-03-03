@@ -135,6 +135,10 @@ class KinovaBackend(ABC):
         """Advance backend control loop and report whether current target is reached."""
 
     @abstractmethod
+    def is_reached(self, **kwargs: Any) -> bool:
+        """Report whether current target is reached without advancing the physics simulation."""
+
+    @abstractmethod
     def get_joint_angles_rad(self) -> list[float]:
         """Read current joint angles in radians."""
 
@@ -285,6 +289,9 @@ class SafetyWrapperBackend(KinovaBackend):
 
     def step(self, **kwargs: Any) -> bool:
         return self._inner.step(**kwargs)
+
+    def is_reached(self, **kwargs: Any) -> bool:
+        return self._inner.is_reached(**kwargs)
 
     def get_joint_angles_rad(self) -> list[float]:
         return self._inner.get_joint_angles_rad()

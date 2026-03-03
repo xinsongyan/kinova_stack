@@ -1,0 +1,107 @@
+<mujoco model="scene_sorting_task">
+  <compiler meshdir="../../kinova_description/meshes/" angle="radian" balanceinertia="true"/>
+  
+  <!-- Optimization Options for stability -->
+  <option integrator="implicitfast" cone="elliptic"/>
+
+  <!-- Include base standalone arm -->
+  <include file="../../kinova_description/mjcf/m1n4s300_standalone.mjcf"/>
+
+  <worldbody>
+    <!-- BASKETS / BINS -->
+    <!-- Basket A: Red Bin (Left side of robot) -->
+    <body name="red_bin" pos="0 0.35 0.01">
+      <!-- Target site for IK placement above basket -->
+      <site name="red_bin_target" pos="0 0 0.25" size="0.01" rgba="1 0 0 0.5" type="sphere"/>
+      <!-- Base (Z half-size 0.01) -->
+      <geom name="red_bin_base" type="box" size="0.1 0.1 0.01" rgba="1 0.6 0.6 1" friction="1 0.1 0.05" condim="3"/>
+      <!-- Walls (Z half-size 0.05, placing center at Z=0.06 relative to bin center so it sits on top of the base) -->
+      <geom name="red_bin_wall1" type="box" pos="0 0.09 0.06" size="0.1 0.01 0.05" rgba="1 0.6 0.6 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="red_bin_wall2" type="box" pos="0 -0.09 0.06" size="0.1 0.01 0.05" rgba="1 0.6 0.6 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="red_bin_wall3" type="box" pos="0.09 0 0.06" size="0.01 0.08 0.05" rgba="1 0.6 0.6 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="red_bin_wall4" type="box" pos="-0.09 0 0.06" size="0.01 0.08 0.05" rgba="1 0.6 0.6 1" friction="1 0.1 0.05" condim="3"/>
+    </body>
+
+    <!-- Basket B: Blue Bin (Right side of robot) -->
+    <body name="blue_bin" pos="0 -0.35 0.01">
+      <!-- Target site for IK placement above basket -->
+      <site name="blue_bin_target" pos="0 0 0.25" size="0.01" rgba="0 0 1 0.5" type="sphere"/>
+      <geom name="blue_bin_base" type="box" size="0.1 0.1 0.01" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="blue_bin_wall1" type="box" pos="0 0.09 0.06" size="0.1 0.01 0.05" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="blue_bin_wall2" type="box" pos="0 -0.09 0.06" size="0.1 0.01 0.05" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="blue_bin_wall3" type="box" pos="0.09 0 0.06" size="0.01 0.08 0.05" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
+      <geom name="blue_bin_wall4" type="box" pos="-0.09 0 0.06" size="0.01 0.08 0.05" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
+    </body>
+
+    <!-- CUBES -->
+    <!-- Red Cubes (Placed within x in [0.15, 0.35], y in [-0.25, 0.25], specifically x=0.20, evenly spaced in Y) -->
+    <body name="cube_red_1" pos="0.20 0.20 0.03">
+      <freejoint name="cube_red_1_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_red_1_geom" type="box" size="0.025 0.025 0.025" rgba="0.8 0 0 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_red_2" pos="0.20 0.10 0.03">
+      <freejoint name="cube_red_2_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_red_2_geom" type="box" size="0.025 0.025 0.025" rgba="0.8 0 0 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_red_3" pos="0.20 0.00 0.03">
+      <freejoint name="cube_red_3_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_red_3_geom" type="box" size="0.025 0.025 0.025" rgba="0.8 0 0 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_red_4" pos="0.20 -0.10 0.03">
+      <freejoint name="cube_red_4_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_red_4_geom" type="box" size="0.025 0.025 0.025" rgba="0.8 0 0 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_red_5" pos="0.20 -0.20 0.03">
+      <freejoint name="cube_red_5_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_red_5_geom" type="box" size="0.025 0.025 0.025" rgba="0.8 0 0 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+
+    <!-- Blue Cubes (Placed x=0.30, evenly spaced in Y) -->
+    <body name="cube_blue_1" pos="0.30 0.20 0.03">
+      <freejoint name="cube_blue_1_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_blue_1_geom" type="box" size="0.025 0.025 0.025" rgba="0 0 0.8 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_blue_2" pos="0.30 0.10 0.03">
+      <freejoint name="cube_blue_2_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_blue_2_geom" type="box" size="0.025 0.025 0.025" rgba="0 0 0.8 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_blue_3" pos="0.30 0.00 0.03">
+      <freejoint name="cube_blue_3_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_blue_3_geom" type="box" size="0.025 0.025 0.025" rgba="0 0 0.8 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_blue_4" pos="0.30 -0.10 0.03">
+      <freejoint name="cube_blue_4_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_blue_4_geom" type="box" size="0.025 0.025 0.025" rgba="0 0 0.8 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+    <body name="cube_blue_5" pos="0.30 -0.20 0.03">
+      <freejoint name="cube_blue_5_joint"/>
+      <inertial pos="0 0 0" mass="0.07" diaginertia="0.000015 0.000015 0.000015"/>
+      <geom name="cube_blue_5_geom" type="box" size="0.025 0.025 0.025" rgba="0 0 0.8 1" contype="1" conaffinity="1" condim="4" friction="2.0 0.1 0.05" solref="0.02 1" solimp="0.9 0.99 0.001"/>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <!-- qpos: 10 robot joints, then 7 DOF per freejoint for each of the 10 cubes -->
+    <key name="home"
+      qpos="1.48353 3.22886 4.90438 0  0 0  0 0  0 0
+            0.25 0.20 0.03 1 0 0 0
+            0.25 0.10 0.03 1 0 0 0
+            0.25 0.00 0.03 1 0 0 0
+            0.25 -0.10 0.03 1 0 0 0
+            0.25 -0.20 0.03 1 0 0 0
+            -0.25 0.20 0.03 1 0 0 0
+            -0.25 0.10 0.03 1 0 0 0
+            -0.25 0.00 0.03 1 0 0 0
+            -0.25 -0.10 0.03 1 0 0 0
+            -0.25 -0.20 0.03 1 0 0 0"/>
+  </keyframe>
+</mujoco>

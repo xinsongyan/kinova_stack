@@ -27,6 +27,13 @@ class SimEnv:
     def step(self):
         mujoco.mj_step(self.model, self.data)
         self.sync_viewer()
+
+    def step_n(self, n: int) -> None:
+        """Run *n* physics substeps and sync viewer once at the end."""
+        for _ in range(n):
+            mujoco.mj_step(self.model, self.data)
+        self.sync_viewer()
+
         
     def sync_viewer(self):
         if self.viewer is None:

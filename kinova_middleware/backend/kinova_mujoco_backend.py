@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import os
 import sys
-from typing import Sequence
+from typing import Any, Sequence
 
 import mujoco
 import numpy as np
@@ -15,8 +15,10 @@ _ROOT_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", ".."))
 if _ROOT_DIR not in sys.path:
     sys.path.append(_ROOT_DIR)
 
-from kinova_sim.controller import PDController  # noqa: E402
+from kinova_sim.controller import ComputedTorqueController, PDController  # noqa: E402
+from kinova_sim.governor import ReferenceGovernor  # noqa: E402
 from kinova_sim.sim_env import SimEnv  # noqa: E402
+from kinova_sim.trajectory import TrajectoryGenerator  # noqa: E402
 
 
 DEFAULT_MODEL_PATH = os.path.join(
@@ -55,7 +57,32 @@ IK_ORIENTATION_WEIGHT = 0.3
 
 
 class KinovaMuJoCoBackend(KinovaBackend):
-    """MuJoCo backend that tracks joint targets with a PD control loop."""
+    """MuJoCo backend with computed-torque control and jerk-limited trajectories."""
+
+    # ── Nominal trajectory limits (per-joint: J1, J2, J3, J4) ────────
+    _V_MAX_ARM = np.array([1.0, 1.0, 1.0, 1.0])          # rad/s
+    _A_MAX_ARM = np.array([2.0, 2.0, 2.0, 2.0])        # rad/s²
+    _J_MAX_ARM = np.array([40.0, 40.0, 40.0, 40.0])    # rad/s³
+
+    # Trajectory shaping bandwidth (per-joint).  Independent of limits so
+    # governor scaling v_max/a_max cannot accidentally increase omega.
+    # Rule of thumb: omega ≈ a_max / v_max for a well-tuned baseline.
+    _OMEGA_ARM = np.array([1.5, 2.0, 2.0, 2.0])           # rad/s
+
+    # ── Computed-torque gains (acceleration space) ───────────────────
+    _KP_ARM = np.array([500.0, 300.0, 300.0, 300.0])         # rad/s²/rad
+    _KD_ARM = np.array([10.0,  30.0, 30.0,  30.0])         # rad/s²/(rad/s)
+
+    # ── Finger PD gains (torque space) ─────────────────────────────
+    _KP_FINGER = 5.0
+    _KD_FINGER = 0.005
+    # "none"=no bias, "gravity_only"=gravity only (hard to isolate in MuJoCo),
+    # "full_bias"=full qfrc_bias.  "none" is safest for small finger joints:
+    # full_bias can introduce chatter from Coriolis coupling with arm motion.
+    FINGER_BIAS_MODE = "none"
+
+    # ── Control / physics rate ───────────────────────────────────────
+    _CONTROL_DT = 0.001  # 1 kHz target control rate
 
     def __init__(
         self,
@@ -80,7 +107,11 @@ class KinovaMuJoCoBackend(KinovaBackend):
         self._target_speed_rad_s = self._resolve_target_speed(target_speed_rad_s)
 
         self._env: SimEnv | None = None
-        self._controller: PDController | None = None
+        self._ct_controller: ComputedTorqueController | None = None
+        self._finger_controller: PDController | None = None
+        self._traj_gen: TrajectoryGenerator | None = None
+        self._governor: ReferenceGovernor | None = None
+        self._n_substeps: int = 2
         self._joint_ids: list[int] = []
         self._qpos_adr: list[int] = []
         self._qvel_adr: list[int] = []
@@ -89,7 +120,6 @@ class KinovaMuJoCoBackend(KinovaBackend):
         self._finger_indices: list[int] = []
         self._arm_indices: list[int] = []
         self._arm_dof_adrs: list[int] = []
-        self._q_target: np.ndarray | None = None
         self._q_target_desired: np.ndarray | None = None
         self._ee_body_id: int | None = None
         self._ee_site_id: int | None = None
@@ -150,22 +180,73 @@ class KinovaMuJoCoBackend(KinovaBackend):
             raise ValueError(f"End-effector body '{self._ee_body_name}' not found in MuJoCo model.")
         self._ee_site_id = self._resolve_ee_site_id(model)
 
-        qpos = data.qpos
-        q_init = np.array([float(qpos[adr]) for adr in self._qpos_adr], dtype=float)
-        self._q_target = q_init.copy()
+        # ── Substep calculation (ceil ensures control_dt >= target) ────
+        physics_dt = float(model.opt.timestep)
+        self._n_substeps = max(1, math.ceil(self._CONTROL_DT / physics_dt))
+        control_dt = self._n_substeps * physics_dt  # effective control dt
+
+        # ── Initial joint state ──────────────────────────────────────
+        q_init = np.array([float(data.qpos[adr]) for adr in self._qpos_adr], dtype=float)
         self._q_target_desired = q_init.copy()
-        kp_default, kd_default = self._default_gains(self.dof)
-        kp = self._resolve_gains(self._kp, kp_default)
-        kd = self._resolve_gains(self._kd, kd_default)
-        self._controller = PDController(kp, kd)
+
+        # ── Trajectory generator (arm joints only) ───────────────────
+        n_arm = len(self._arm_indices)
+        q_arm_init = np.array([q_init[i] for i in self._arm_indices], dtype=float)
+        self._traj_gen = TrajectoryGenerator(
+            n_joints=n_arm,
+            v_max=self._V_MAX_ARM,
+            a_max=self._A_MAX_ARM,
+            j_max=self._J_MAX_ARM,
+            omega=self._OMEGA_ARM,
+            dt=control_dt,
+        )
+        self._traj_gen.reset(q_arm_init)
+
+        # ── Computed torque controller (arm) ─────────────────────────
+        self._ct_controller = ComputedTorqueController(
+            Kp=self._KP_ARM,
+            Kd=self._KD_ARM,
+            arm_dof_adrs=self._arm_dof_adrs,
+            nv=model.nv,
+        )
+
+        # ── Finger PD controller ─────────────────────────────────────
+        n_fingers = len(self._finger_indices)
+        self._finger_controller = PDController(
+            Kp=np.full(n_fingers, self._KP_FINGER),
+            Kd=np.full(n_fingers, self._KD_FINGER),
+        )
+
+        # ── Reference governor (J1) ──────────────────────────────────
+        j1_limit = 25.0 # Enforce strict 25.0 Nm limit
+        self._governor = ReferenceGovernor(torque_limit=j1_limit)
+        self._j1_torque_limit = j1_limit
+
+        # ── CSV logging (at control rate) ────────────────────────────
+        self._j1_log_file = open("j1_tracking_log.csv", "w")
+        self._j1_log_file.write(
+            "time,"
+            "q_des_j1,q_j1,err_j1,"
+            "qd_des_j1,qd_j1,"
+            "qdd_des_j1,qdd_cmd_j1,"
+            "tau_raw_j1,tau_sat_j1,"
+            "util_raw_j1,util_ema_j1,"
+            "gov_scale_cur,gov_scale_next,"
+            "braking_j1\n"
+        )
 
     def close(self) -> None:
+        if hasattr(self, "_j1_log_file") and self._j1_log_file:
+            self._j1_log_file.close()
+            self._j1_log_file = None
         if self._env is None:
             return
         self._env.close()
         self._env = None
-        self._controller = None
-        self._q_target = None
+        self._ct_controller = None
+        self._finger_controller = None
+        self._traj_gen = None
+        self._governor = None
 
     def move_home(self) -> None:
         env = self._require_env()
@@ -192,8 +273,10 @@ class KinovaMuJoCoBackend(KinovaBackend):
         for local_idx, joint_idx in enumerate(self._arm_indices):
             q_full[joint_idx] = q_arm[local_idx]
         self._q_target_desired = self._clip_q(q_full)
-        if self._q_target is None:
-            self._q_target = self._q_target_desired.copy()
+        # Update trajectory generator goal
+        if self._traj_gen is not None:
+            q_arm_goal = np.array([self._q_target_desired[i] for i in self._arm_indices])
+            self._traj_gen.set_goal(q_arm_goal)
 
     def step(
         self,
@@ -201,53 +284,108 @@ class KinovaMuJoCoBackend(KinovaBackend):
         vel_tol_rad_s: float = math.radians(2.0),
     ) -> bool:
         env = self._require_env()
-        controller = self._require_controller()
-        q_target_desired = self._require_q_target_desired()
+        model = env.model
+        data = env.data
+        gov = self._governor
+        traj = self._traj_gen
 
-        q = np.array([env.data.qpos[adr] for adr in self._qpos_adr], dtype=float)
-        qd = np.array([env.data.qvel[adr] for adr in self._qvel_adr], dtype=float)
-        if self._target_speed_rad_s is not None:
-            q_target_filtered = self._require_q_target().copy()
-            max_delta = float(self._target_speed_rad_s) * float(env.dt)
-            delta = np.clip(q_target_desired - q_target_filtered, -max_delta, max_delta)
-            q_target_filtered = q_target_filtered + delta
-            self._q_target = q_target_filtered
-            q_target = q_target_filtered
-        else:
-            q_target = q_target_desired
-            self._q_target = q_target_desired
+        # ══ a) Read sensors (once per control tick) ══════════════════
+        q = np.array([data.qpos[adr] for adr in self._qpos_adr], dtype=float)
+        qd = np.array([data.qvel[adr] for adr in self._qvel_adr], dtype=float)
 
-        tau = np.asarray(controller.compute(q, qd, q_target), dtype=float)
-        if tau.shape != (len(self._actuator_ids),):
-            raise ValueError(
-                f"PD output must have shape ({len(self._actuator_ids)},), got {tau.shape}"
+        q_arm = np.array([q[i] for i in self._arm_indices], dtype=float)
+        qd_arm = np.array([qd[i] for i in self._arm_indices], dtype=float)
+        q_fingers = np.array([q[i] for i in self._finger_indices], dtype=float)
+        qd_fingers = np.array([qd[i] for i in self._finger_indices], dtype=float)
+
+        # ══ b) Apply governor scale from PREVIOUS tick to trajectory ══
+        # scale_next was computed last tick; now apply it so the trajectory
+        # uses the adjusted limits for its update.
+        s = gov.scale_current  # committed last tick
+        traj.set_limits(
+            0,
+            v_max=self._V_MAX_ARM[0] * s,
+            a_max=self._A_MAX_ARM[0] * s,
+        )
+
+        # ══ c) Advance trajectory generator ═══════════════════════════
+        q_des, qd_des, qdd_des = traj.update()
+
+        # ══ d) Computed torque controller (arm) — produces RAW torque ═
+        tau_arm_raw, qdd_pd, qdd_cmd = self._ct_controller.compute(
+            model, data,
+            q_des, qd_des, qdd_des,
+            q_arm, qd_arm,
+        )
+        tau_raw_j1 = float(tau_arm_raw[0])
+
+        # ══ e) Update governor using RAW (pre-saturation) J1 torque ══
+        # Returns (scale_current, scale_next).  scale_next will be
+        # applied on the NEXT tick.
+        gov_cur, gov_next = gov.update(tau_raw_j1)
+
+        # ══ f) Finger PD ────────────────────────────────────────
+        q_fingers_des = np.array(
+            [self._q_target_desired[i] for i in self._finger_indices], dtype=float
+        )
+        tau_fingers_pd, _, _ = self._finger_controller.compute(
+            q_fingers, qd_fingers, q_fingers_des
+        )
+        tau_fingers = np.array(tau_fingers_pd, dtype=float)
+        # FINGER_BIAS_MODE: controls whether bias forces are added.
+        # "none":         safest default — fingers are small and don't need
+        #                 gravity comp; adding full bias risks Coriolis chatter.
+        # "gravity_only": ideal but hard to isolate in MuJoCo (qfrc_bias
+        #                 includes Coriolis).  Not implemented here.
+        # "full_bias":    adds full qfrc_bias including Coriolis coupling
+        #                 with arm motion — can cause chatter.
+        if self.FINGER_BIAS_MODE == "full_bias":
+            for fi, idx in enumerate(self._finger_indices):
+                tau_fingers[fi] += float(data.qfrc_bias[self._qvel_adr[idx]])
+
+        # ══ g) Assemble ctrl + saturation ─────────────────────────
+        ctrl = np.zeros(model.nu, dtype=float)
+        tau_sat_j1 = 0.0
+
+        for ai, arm_idx in enumerate(self._arm_indices):
+            actuator_id = self._actuator_ids[arm_idx]
+            tau_val = float(tau_arm_raw[ai])
+            if ai == 0:
+                # J1: smooth tanh saturation to avoid hard-clip discontinuity
+                limit = self._j1_torque_limit
+                tau_sat = float(limit * np.tanh(tau_val / limit)) if limit > 0 else tau_val
+                tau_sat_j1 = tau_sat
+            else:
+                tau_sat = self._clip_actuator_force(model, actuator_id, tau_val)
+            ctrl[actuator_id] = tau_sat
+
+        for fi, finger_idx in enumerate(self._finger_indices):
+            actuator_id = self._actuator_ids[finger_idx]
+            ctrl[actuator_id] = self._clip_actuator_force(
+                model, actuator_id, float(tau_fingers[fi])
             )
 
-        # Add gravity compensation (feedforward)
-        # qfrc_bias contains gravity + centrifugal/coriolis forces
-        for i, idx in enumerate(self._qvel_adr):
-            tau[i] += float(env.data.qfrc_bias[idx])
+        # ══ h) Substeps (N × mj_step + 1 viewer sync) ──────────────
+        data.ctrl[:] = ctrl
+        env.step_n(self._n_substeps)
 
-        ctrl = np.zeros(env.model.nu, dtype=float)
-        for tau_i, actuator_id in zip(tau, self._actuator_ids):
-            tau_i = self._clip_actuator_force(env.model, actuator_id, float(tau_i))
-            ctrl[actuator_id] = tau_i
-        env.set_ctrl(ctrl)
-        env.step()
+        # ══ i) Log at control rate ─────────────────────────────────
+        if hasattr(self, "_j1_log_file") and self._j1_log_file:
+            self._j1_log_file.write(
+                f"{data.time:.6f},"
+                f"{q_des[0]:.6f},{q_arm[0]:.6f},{q_des[0]-q_arm[0]:.6f},"
+                f"{qd_des[0]:.6f},{qd_arm[0]:.6f},"
+                f"{qdd_des[0]:.6f},{qdd_cmd[0]:.6f},"
+                f"{tau_raw_j1:.6f},{tau_sat_j1:.6f},"
+                f"{gov.util_raw:.4f},{gov.util_ema:.4f},"
+                f"{gov_cur:.4f},{gov_next:.4f},"
+                f"{int(traj.braking[0])}\n"
+            )
+
         return self.is_desired_position_reached(pos_tol_rad=pos_tol_rad, vel_tol_rad_s=vel_tol_rad_s)
 
-    def is_desired_position_reached(
-        self,
-        pos_tol_rad: float = math.radians(0.8),
-        vel_tol_rad_s: float = math.radians(2.0),
-    ) -> bool:
-        env = self._require_env()
-        q_target_desired = self._require_q_target_desired()
-        q = np.array([env.data.qpos[adr] for adr in self._qpos_adr], dtype=float)
-        qd = np.array([env.data.qvel[adr] for adr in self._qvel_adr], dtype=float)
-        max_pos_err = float(np.max(np.abs(q_target_desired - q)))
-        max_vel = float(np.max(np.abs(qd)))
-        return bool(max_pos_err <= float(pos_tol_rad) and max_vel <= float(vel_tol_rad_s))
+    def is_reached(self, **kwargs: Any) -> bool:
+        return self.is_desired_position_reached(**kwargs)
 
     def _debug_counter(self) -> int:
         if not hasattr(self, "_step_count"):
@@ -264,10 +402,10 @@ class KinovaMuJoCoBackend(KinovaBackend):
         q_target_desired = self._require_q_target_desired()
         q = np.array([env.data.qpos[adr] for adr in self._qpos_adr], dtype=float)
         qd = np.array([env.data.qvel[adr] for adr in self._qvel_adr], dtype=float)
-        max_pos_err = float(np.max(np.abs(q_target_desired - q)))
-        max_vel = float(np.max(np.abs(qd)))
-
-        return bool(max_pos_err <= float(pos_tol_rad) and max_vel <= float(vel_tol_rad_s))
+        # Check ARM joints only (Fix 3a)
+        arm_pos_err = max(abs(q_target_desired[i] - q[i]) for i in self._arm_indices)
+        arm_vel = max(abs(qd[i]) for i in self._arm_indices)
+        return bool(arm_pos_err <= float(pos_tol_rad) and arm_vel <= float(vel_tol_rad_s))
 
     def get_joint_angles_rad(self) -> list[float]:
         env = self._require_env()
@@ -286,8 +424,6 @@ class KinovaMuJoCoBackend(KinovaBackend):
             if np.isfinite(low) and np.isfinite(high):
                 q_target[idx] = low + (1.0 - p) * (high - low)
         self._q_target_desired = self._clip_q(q_target)
-        if self._q_target is None:
-            self._q_target = self._q_target_desired.copy()
 
     def get_finger_forces(self) -> dict:
         """Read current actuator forces for finger joints.
@@ -297,7 +433,7 @@ class KinovaMuJoCoBackend(KinovaBackend):
             and 'contact_detected' (bool) based on force threshold.
         """
         env = self._require_env()
-        F_MAX = 2.0  # must match MJCF forcerange
+        F_MAX = 10.0  # must match MJCF forcerange
         CONTACT_THRESHOLD = 0.8 * F_MAX
 
         forces = []
@@ -321,6 +457,7 @@ class KinovaMuJoCoBackend(KinovaBackend):
             "max_abs_force": round(max_abs, 4),
             "contact_detected": contact_detected,
         }
+
 
     def solve_ik(
         self,
@@ -543,36 +680,6 @@ class KinovaMuJoCoBackend(KinovaBackend):
             raise ValueError(f"Actuator '{name}' not found in MuJoCo model.")
         return aid
 
-    @staticmethod
-    def _default_gains(dof: int) -> tuple[np.ndarray, np.ndarray]:
-        if dof <= 4:
-            # Arm only
-            kp = np.full(dof, 800.0, dtype=float)
-            kd = np.full(dof, 80.0, dtype=float)
-            return kp, kd
-        
-        kp = np.full(dof, 1.0, dtype=float)
-        kd = np.full(dof, 0.002, dtype=float)
-        
-        # Arm joints
-        # 4-DOF: Base, Shoulder, Elbow, Wrist
-        # Use lower gains for distal joints to prevent oscillation
-        kp[:4] = [300.0, 300.0, 150.0, 50.0]
-        kd[:4] = [30.0, 30.0, 15.0, 5.0]
-
-        return kp, kd
-
-    def _resolve_gains(
-        self, values: Sequence[float] | float | None, default: np.ndarray
-    ) -> np.ndarray:
-        if values is None:
-            return default
-        arr = np.array(values, dtype=float)
-        if arr.size == 1:
-            return np.full(self.dof, float(arr.item()), dtype=float)
-        if arr.size != self.dof:
-            raise ValueError(f"Expected {self.dof} gain values, got {arr.size}.")
-        return arr
 
     def _clip_q(self, q: np.ndarray) -> np.ndarray:
         q_clipped = q.copy()
@@ -593,15 +700,10 @@ class KinovaMuJoCoBackend(KinovaBackend):
             raise RuntimeError("KinovaMuJoCoBackend.init() must be called before use.")
         return self._env
 
-    def _require_controller(self) -> PDController:
-        if self._controller is None:
+    def _require_traj_gen(self) -> TrajectoryGenerator:
+        if self._traj_gen is None:
             raise RuntimeError("KinovaMuJoCoBackend.init() must be called before use.")
-        return self._controller
-
-    def _require_q_target(self) -> np.ndarray:
-        if self._q_target is None:
-            raise RuntimeError("KinovaMuJoCoBackend.init() must be called before use.")
-        return self._q_target
+        return self._traj_gen
 
     def _require_q_target_desired(self) -> np.ndarray:
         if self._q_target_desired is None:

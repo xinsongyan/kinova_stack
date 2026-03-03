@@ -44,17 +44,17 @@ from kinova_mujoco_backend import KinovaMuJoCoBackend
 from kinova_backend import CartesianPose
 
 import sys as _sys
-_middleware_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-if _middleware_dir not in _sys.path:
-    _sys.path.insert(0, _middleware_dir)
+_scenes_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "scenes"))
+if _scenes_dir not in _sys.path:
+    _sys.path.insert(0, _scenes_dir)
 from scene_selector import select_scene  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration from environment
 # ---------------------------------------------------------------------------
 KINOVA_MODE: str = os.getenv("KINOVA_MODE", "sim").strip().lower()
-TARGET_SPEED: float = float(os.getenv("KINOVA_TARGET_SPEED_RAD_S", "1.5"))
-CONTROL_HZ: float = float(os.getenv("CONTROL_HZ", "2000"))
+TARGET_SPEED: float = float(os.getenv("KINOVA_TARGET_SPEED_RAD_S", "2.0"))
+CONTROL_HZ: float = float(os.getenv("CONTROL_HZ", "500"))
 HOLD_SECONDS: float = float(os.getenv("HOLD_SECONDS", "0.4"))
 COMMAND_TIMEOUT_S: float = float(os.getenv("COMMAND_TIMEOUT_S", "30.0"))
 
@@ -120,7 +120,7 @@ def _run_until_reached(
 
     while time.monotonic() < deadline:
         with _physics_lock:
-            reached = ctrl.step(**kwargs)
+            reached = ctrl.is_reached(**kwargs)
             # Optional: poll error for debugging (expensive?)
             # err = ctrl._backend.get_max_position_error() 
 
@@ -334,8 +334,6 @@ def set_gripper(percent: float) -> dict:
         "message": msg,
     }
 
-
-# ── Tool 5: move_joints ──────────────────────────────────────────────────
 
 @mcp.tool()
 def move_joints(
@@ -590,7 +588,28 @@ def get_object_pose(body_name: str) -> dict:
     # Handle specific body request
     body_id = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_BODY, body_name)
     if body_id < 0:
-        return {"status": "error", "message": f"Body '{body_name}' not found in model."}
+        # Fallback to checking sites
+        site_id = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_SITE, body_name)
+        if site_id < 0:
+            return {"status": "error", "message": f"Body or site '{body_name}' not found in model."}
+        
+        with _physics_lock:
+            pos = data.site(site_id).xpos.copy()
+            # Sites may not have a populated xquat depending on the solver/frame, but we can grab their orientation from the model or simply return identity since we only care about position for targets
+            quat_wxyz = [1.0, 0.0, 0.0, 0.0]
+            if hasattr(data.site(site_id), 'xquat'):
+                quat_wxyz = data.site(site_id).xquat.copy()
+            
+        return {
+            "body_name": body_name,
+            "position": {"x": float(pos[0]), "y": float(pos[1]), "z": float(pos[2])},
+            "size": [0.01],
+            "geom_type": "site",
+            "quaternion": {
+                "qx": float(quat_wxyz[1]), "qy": float(quat_wxyz[2]), 
+                "qz": float(quat_wxyz[3]), "qw": float(quat_wxyz[0])
+            }
+        }
 
     return _get_body_info(body_id)
 
