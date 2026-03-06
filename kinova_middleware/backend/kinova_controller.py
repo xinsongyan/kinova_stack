@@ -52,17 +52,19 @@ class KinovaController:
         target_pos: Sequence[float],
         target_quat: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
         """Solve IK for target pose; returns joint targets in radians."""
-        return self._backend.solve_ik(target_pos, target_quat, q_seed)
+        return self._backend.solve_ik(target_pos, target_quat, q_seed, move_wrist=move_wrist)
 
     def solve_ik_position_only(
         self,
         target_pos: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
         """Solve IK for position only (no orientation constraint)."""
-        return self._backend.solve_ik_position_only(target_pos, q_seed)
+        return self._backend.solve_ik_position_only(target_pos, q_seed, move_wrist=move_wrist)
 
     def plan_to_pose(
         self,
@@ -90,6 +92,10 @@ class KinovaController:
 
     def get_joint_vel_rad(self) -> list[float]:
         return self._backend.get_joint_vel_rad()
+
+    def get_target_joint_angles_rad(self) -> list[float]:
+        """Read current target joint angles in radians."""
+        return self._backend.get_target_joint_angles_rad()
 
     def set_gripper_percent(self, percent: float) -> None:
         """Set gripper opening percentage in [0.0, 1.0]."""

@@ -26,7 +26,7 @@
     </body>
 
     <!-- Green cube – back centre -->
-    <body name="cube_3" pos="0.0 0.22 0.03" quat="1 0 0 0">
+    <body name="cube_3" pos="0.0 -0.22 0.03" quat="1 0 0 0">
       <freejoint name="cube_3_joint"/>
       <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
       <geom name="cube_3_geom"
@@ -42,6 +42,6 @@
       qpos="1.48353 3.22886 4.90438 0  0 0  0 0  0 0
             0.2 -0.2 0.03  1 0 0 0
             -0.2 -0.2 0.03  1 0 0 0
-            0.0 -0.3 0.03  1 0 0 0"/>
+            0.0 0.3 0.03  1 0 0 0"/>
   </keyframe>
 </mujoco>

@@ -1,0 +1,40 @@
+<mujoco model="ik_verification">
+  <compiler meshdir="../../kinova_description/meshes/" angle="radian" balanceinertia="true"/>
+  <include file="../../kinova_description/mjcf/m1n4s300_standalone.mjcf"/>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" directional="true" castshadow="false"/>
+    
+    <!-- Group 1: 12 targets on a ring around the base (alternating radius 0.25/0.40 and z 0.15/0.25) -->
+    <site name="target_01" pos="0.250 0.000 0.150" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_02" pos="0.346 0.200 0.250" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_03" pos="0.125 0.217 0.150" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_04" pos="0.000 0.400 0.250" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_05" pos="-0.125 0.217 0.150" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_06" pos="-0.346 0.200 0.250" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_07" pos="-0.250 0.000 0.150" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_08" pos="-0.346 -0.200 0.250" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_09" pos="-0.125 -0.217 0.150" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_10" pos="-0.000 -0.400 0.250" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_11" pos="0.125 -0.217 0.150" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    <site name="target_12" pos="0.346 -0.200 0.250" size="0.01" rgba="1 0 0 1" type="sphere"/>
+    
+    <!-- Group 2: 4 targets near the ground (z=0.20, radius=0.3) -->
+    <site name="target_13" pos="0.212 0.212 0.200" size="0.01" rgba="0 1 0 1" type="sphere"/>
+    <site name="target_14" pos="-0.212 0.212 0.200" size="0.01" rgba="0 1 0 1" type="sphere"/>
+    <site name="target_15" pos="-0.212 -0.212 0.200" size="0.01" rgba="0 1 0 1" type="sphere"/>
+    <site name="target_16" pos="0.212 -0.212 0.200" size="0.01" rgba="0 1 0 1" type="sphere"/>
+    
+    <!-- Group 3: 4 elevated targets (z=0.40, radius=0.25) -->
+    <site name="target_17" pos="0.065 0.241 0.400" size="0.01" rgba="0 0 1 1" type="sphere"/>
+    <site name="target_18" pos="-0.241 0.065 0.400" size="0.01" rgba="0 0 1 1" type="sphere"/>
+    <site name="target_19" pos="-0.065 -0.241 0.400" size="0.01" rgba="0 0 1 1" type="sphere"/>
+    <site name="target_20" pos="0.241 -0.065 0.400" size="0.01" rgba="0 0 1 1" type="sphere"/>
+  </worldbody>
+
+  <keyframe>
+    <!-- qpos: 10 robot joints -->
+    <key name="home"
+      qpos="1.48353 3.22886 4.90438 0  0 0  0 0  0 0"/>
+  </keyframe>
+</mujoco>

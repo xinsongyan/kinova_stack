@@ -37,6 +37,7 @@ import time
 from typing import Any
 
 from fastmcp import FastMCP
+import numpy as np
 
 # ── project imports (on PYTHONPATH via the run script) ──────────────────────
 from kinova_controller import KinovaController
@@ -111,6 +112,22 @@ def _run_until_reached(
     deadline = time.monotonic() + timeout_s
     settled_since: float | None = None
     
+    # ── Trajectory Tracking ─────────────────────────────────────────
+    with _physics_lock:
+        q_start = np.array(ctrl.get_joint_angles_rad()[:ctrl.arm_dof])
+        # Capture starting Cartesian position (position only)
+        pos_tuple, _ = ctrl.get_end_effector_pose()
+        p_start = np.array(pos_tuple)
+        q_target = np.array(ctrl.get_target_joint_angles_rad())
+    
+    dist_direct = float(np.linalg.norm(q_target - q_start))
+    accum_dist = 0.0
+    q_prev = q_start.copy()
+    
+    # Trackers for 1/4, 2/4, 3/4 progress
+    milestones = [0.25, 0.50, 0.75]
+    milestone_states = {} # milestone -> (q_state, p_state)
+    
     # Default to looser tolerance if not specified (5 deg pos, 10 deg/s vel)
     # Default to looser tolerance if not specified
     if "pos_tol_rad" not in kwargs:
@@ -121,20 +138,72 @@ def _run_until_reached(
     while time.monotonic() < deadline:
         with _physics_lock:
             reached = ctrl.is_reached(**kwargs)
-            # Optional: poll error for debugging (expensive?)
-            # err = ctrl._backend.get_max_position_error() 
+            q_curr = np.array(ctrl.get_joint_angles_rad()[:ctrl.arm_dof])
+            # Capture current Cartesian position
+            pos_tuple, _ = ctrl.get_end_effector_pose()
+            p_curr = np.array(pos_tuple)
+
+        # Track accumulated travel
+        step_dist = float(np.linalg.norm(q_curr - q_prev))
+        accum_dist += step_dist
+        q_prev = q_curr.copy()
+        
+        # Check milestones based on straight-line distance progress
+        if dist_direct > 0.01:
+            for m in milestones:
+                if m not in milestone_states:
+                    prog = float(np.linalg.norm(q_curr - q_start))
+                    if prog >= m * dist_direct:
+                        milestone_states[m] = (q_curr.copy(), p_curr.copy())
 
         if reached:
             if settled_since is None:
                 settled_since = time.monotonic()
             if time.monotonic() - settled_since >= hold_seconds:
+                # Log final report
+                _log_trajectory_report(q_start, p_start, q_target, q_curr, p_curr, milestone_states, dist_direct, accum_dist)
                 return True
         else:
             settled_since = None
 
         time.sleep(dt)
 
-    return False  # timeout
+    # Log timeout report
+    with _physics_lock:
+        q_final = np.array(ctrl.get_joint_angles_rad()[:ctrl.arm_dof])
+        pos_tuple, _ = ctrl.get_end_effector_pose()
+        p_final = np.array(pos_tuple)
+    _log_trajectory_report(q_start, p_start, q_target, q_final, p_final, milestone_states, dist_direct, accum_dist, timed_out=True)
+    return False
+
+
+def _log_trajectory_report(q_start, p_start, q_target, q_end, p_end, milestones, dist_direct, dist_accum, timed_out=False):
+    """Print a detailed joint-space and Cartesian trajectory report to the log."""
+    def fmt_q(q):
+        return "[" + ", ".join(f"{v:+.3f}" for v in q) + "]"
+    
+    def fmt_p(p):
+        return f"({p[0]:+.3f}, {p[1]:+.3f}, {p[2]:+.3f})"
+    
+    label = "TIMEOUT" if timed_out else "REACHED"
+    log.info("── Trajectory Report [%s] ──────────────────", label)
+    log.info("  Start:  %s  %s", fmt_q(q_start), fmt_p(p_start))
+    
+    if 0.25 in milestones: 
+        q, p = milestones[0.25]
+        log.info("  1/4:    %s  %s", fmt_q(q), fmt_p(p))
+    if 0.50 in milestones: 
+        q, p = milestones[0.50]
+        log.info("  1/2:    %s  %s", fmt_q(q), fmt_p(p))
+    if 0.75 in milestones: 
+        q, p = milestones[0.75]
+        log.info("  3/4:    %s  %s", fmt_q(q), fmt_p(p))
+        
+    log.info("  End:    %s  %s", fmt_q(q_end), fmt_p(p_end))
+    log.info("  Target: %s", fmt_q(q_target))
+    log.info("  Distances: Direct=%.4f, Traveled=%.4f (ratio=%.2f)", 
+             dist_direct, dist_accum, dist_accum/dist_direct if dist_direct > 1e-6 else 1.0)
+    log.info("──────────────────────────────────────────────────")
 
 
 def _quat_rotation_error(
@@ -268,24 +337,6 @@ def get_end_effector_pose() -> dict:
         "quaternion": {"qx": quat[0], "qy": quat[1], "qz": quat[2], "qw": quat[3]},
     }
 
-
-# ── Tool 3: get_joint_state ───────────────────────────────────────────────
-
-@mcp.tool()
-def get_joint_state() -> dict:
-    """Read current joint angles (rad) and velocities (rad/s) (non-blocking).
-
-    Returns:
-        q_rad: list of joint angles
-        qd_rad_s: list of joint velocities
-    """
-    ctrl = _get_controller()
-    with _physics_lock:
-        q = ctrl.get_joint_angles_rad()
-        qd = ctrl.get_joint_vel_rad()
-    return {"q_rad": q, "qd_rad_s": qd}
-
-
 # ── Tool 4: set_gripper ──────────────────────────────────────────────────
 
 @mcp.tool()
@@ -316,68 +367,18 @@ def set_gripper(percent: float) -> dict:
     # Read finger forces after settling
     try:
         force_info = ctrl.get_finger_forces()
-        contact = force_info.get("contact_detected", False)
         max_force = force_info.get("max_abs_force", 0.0)
     except Exception:
-        contact = False
         max_force = 0.0
 
     msg = f"Gripper set to {p*100:.0f}%."
-    if contact:
-        msg += f" Contact detected (F={max_force:.2f}N)."
     log.info("  → %s", msg)
     return {
         "status": "ok",
         "percent": p,
-        "contact_detected": contact,
         "max_actuator_force": max_force,
         "message": msg,
     }
-
-
-@mcp.tool()
-def move_joints(
-    q: list[float],
-    units: str = "deg",
-) -> dict:
-    """Move the arm joints to target angles and block until reached.
-
-    Accepts arm joints only (length must equal arm_dof).
-
-    Args:
-        q: target joint values (arm joints only)
-        units: "deg" or "rad" (default "deg")
-
-    Returns:
-        status: "ok" | "timeout"
-        reached: bool
-        final_q_rad: final joint angles in radians
-    """
-    ctrl = _get_controller()
-    n = ctrl.arm_dof
-    log.info("Tool  move_joints(%s, units=%s)", q, units)
-
-    if len(q) != n:
-        return {
-            "status": "error",
-            "message": f"Expected {n} arm joints, got {len(q)}.",
-        }
-
-    if units.lower().startswith("d"):
-        q_rad = [math.radians(float(v)) for v in q]
-    else:
-        q_rad = [float(v) for v in q]
-
-    with _motion_lock:
-        ctrl.send_joint_position_rad(q_rad)
-        reached = _run_until_reached()
-
-    with _physics_lock:
-        final_q = ctrl.get_joint_angles_rad()
-
-    status = "ok" if reached else "timeout"
-    log.info("  → %s  reached=%s", status, reached)
-    return {"status": status, "reached": reached, "final_q_rad": final_q}
 
 
 # ── Tool 6: move_pose ────────────────────────────────────────────────────
@@ -388,6 +389,7 @@ def move_pose(
     target_quat: list[float],
     seed_q_rad: list[float] | None = None,
     allow_orientation_fallback: bool = True,
+    move_wrist: bool = True,
 ) -> dict:
     """Move the end-effector to a Cartesian pose (IK → joint command → block).
 
@@ -397,6 +399,8 @@ def move_pose(
         seed_q_rad: optional IK seed (arm joints)
         allow_orientation_fallback: if True and quaternion is invalid,
             fall back to position-only IK
+        move_wrist: if False, the wrist joint (last arm joint) is kept frozen
+            at its current position during IK solving.
 
     Returns:
         status: "ok" | "timeout" | "error"
@@ -407,7 +411,7 @@ def move_pose(
         rot_err: rotation error (rad), null if position-only
     """
     ctrl = _get_controller()
-    log.info("Tool  move_pose(pos=%s, quat=%s)", target_pos, target_quat)
+    log.info("Tool  move_pose(pos=%s, quat=%s, move_wrist=%s)", target_pos, target_quat, move_wrist)
 
     if len(target_pos) != 3:
         return {"status": "error", "message": "target_pos must have 3 elements."}
@@ -436,9 +440,9 @@ def move_pose(
     try:
         with _physics_lock:
             if mode_used == "position_only":
-                q_target = ctrl.solve_ik_position_only(target_pos, seed_q_rad)
+                q_target = ctrl.solve_ik_position_only(target_pos, seed_q_rad, move_wrist=move_wrist)
             else:
-                q_target = ctrl.solve_ik(target_pos, target_quat, seed_q_rad)
+                q_target = ctrl.solve_ik(target_pos, target_quat, seed_q_rad, move_wrist=move_wrist)
     except ValueError as exc:
         log.error("  IK / safety error: %s", exc)
         return {"status": "error", "message": f"ik_failed: {exc}"}

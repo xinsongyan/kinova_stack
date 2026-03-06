@@ -115,6 +115,7 @@ class KinovaBackend(ABC):
         target_pos: Sequence[float],
         target_quat: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
         """Solve IK for target pose; returns joint targets in radians."""
 
@@ -122,13 +123,14 @@ class KinovaBackend(ABC):
         self,
         target_pos: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
         """Solve IK for position only (no orientation constraint).
 
         Default implementation falls back to ``solve_ik`` with identity
         quaternion.  Backends may override with a specialised solver.
         """
-        return self.solve_ik(target_pos, [0.0, 0.0, 0.0, 1.0], q_seed)
+        return self.solve_ik(target_pos, [0.0, 0.0, 0.0, 1.0], q_seed, move_wrist=move_wrist)
 
     @abstractmethod
     def step(self, **kwargs: Any) -> bool:
@@ -141,6 +143,10 @@ class KinovaBackend(ABC):
     @abstractmethod
     def get_joint_angles_rad(self) -> list[float]:
         """Read current joint angles in radians."""
+
+    @abstractmethod
+    def get_target_joint_angles_rad(self) -> list[float]:
+        """Read current target joint angles in radians (the goal of the motion)."""
 
     @abstractmethod
     def get_joint_vel_rad(self) -> list[float]:
@@ -261,13 +267,14 @@ class SafetyWrapperBackend(KinovaBackend):
         target_pos: Sequence[float],
         target_quat: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
         safe_pose = CartesianPose.from_position_orientation(target_pos, target_quat)
         safe_pose = self._apply_cartesian_limits(safe_pose)
 
         try:
             q_candidate = self._inner.solve_ik(
-                safe_pose.position(), safe_pose.quaternion(), q_seed
+                safe_pose.position(), safe_pose.quaternion(), q_seed, move_wrist=move_wrist
             )
         except Exception as exc:
             raise ValueError("Cartesian pose rejected: IK failed.") from exc
@@ -284,8 +291,9 @@ class SafetyWrapperBackend(KinovaBackend):
         self,
         target_pos: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
-        return self._inner.solve_ik_position_only(target_pos, q_seed)
+        return self._inner.solve_ik_position_only(target_pos, q_seed, move_wrist=move_wrist)
 
     def step(self, **kwargs: Any) -> bool:
         return self._inner.step(**kwargs)
@@ -295,6 +303,9 @@ class SafetyWrapperBackend(KinovaBackend):
 
     def get_joint_angles_rad(self) -> list[float]:
         return self._inner.get_joint_angles_rad()
+
+    def get_target_joint_angles_rad(self) -> list[float]:
+        return self._inner.get_target_joint_angles_rad()
 
     def get_joint_vel_rad(self) -> list[float]:
         return self._inner.get_joint_vel_rad()

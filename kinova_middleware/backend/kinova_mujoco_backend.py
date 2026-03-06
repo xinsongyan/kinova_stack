@@ -53,8 +53,267 @@ IK_POS_TOL = 1e-3
 IK_ROT_TOL = 1e-2
 IK_DAMPING = 1e-2
 IK_STEP_SIZE = 0.8
-IK_ORIENTATION_WEIGHT = 0.3
+IK_ORIENTATION_WEIGHT = 0.01
 
+def wrap_to_pi(angle):
+    return (angle + np.pi) % (2*np.pi) - np.pi
+
+def joint_distance(q1, q2, continuous_indices):
+    diff = q1 - q2
+
+    for idx in continuous_indices:
+        diff[idx] = wrap_to_pi(diff[idx])
+
+    return np.linalg.norm(diff)
+
+def shortest_joint_configuration(q_current, q_solution, continuous_indices):
+    q_fixed = q_solution.copy()
+
+    for idx in continuous_indices:
+        delta = q_solution[idx] - q_current[idx]
+        delta_wrapped = wrap_to_pi(delta)
+        q_fixed[idx] = q_current[idx] + delta_wrapped
+
+    return q_fixed
+
+
+def _orientation_error_vector(target_vec: np.ndarray, current_vec: np.ndarray) -> np.ndarray:
+    """Return the minimal rotation vector (axis * angle) to align current_vec with target_vec."""
+    v0 = current_vec / np.linalg.norm(current_vec)
+    v1 = target_vec / np.linalg.norm(target_vec)
+    dot = np.clip(np.dot(v0, v1), -1.0, 1.0)
+    angle = np.arccos(dot)
+    if angle < 1e-6:
+        return np.zeros(3)
+    axis = np.cross(v0, v1)
+    axis_norm = np.linalg.norm(axis)
+    if axis_norm < 1e-6:
+        axis = np.array([1.0, 0.0, 0.0])
+        if abs(v0[0]) > 0.9:
+            axis = np.array([0.0, 1.0, 0.0])
+        axis = axis - np.dot(axis, v0) * v0
+        axis = axis / np.linalg.norm(axis)
+    else:
+        axis = axis / axis_norm
+    return axis * angle
+
+class LevenbergMarquardtIK:
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        ee_site_id: int,
+        arm_qpos_adrs: list[int],
+        arm_qvel_adrs: list[int],
+        arm_joint_limits: list[tuple[float, float]],
+        continuous_indices: list[int] | None = None,
+        max_iters: int = 50, # Cap at 50 to ensure real-time performance
+        pos_tol: float = 0.001,
+        ori_weight: float = IK_ORIENTATION_WEIGHT,
+        initial_lambda: float = 0.1,
+    ):
+        self.model = model
+        self.data = data
+        self.ee_site_id = ee_site_id
+        self.arm_qpos_adrs = arm_qpos_adrs
+        self.arm_qvel_adrs = arm_qvel_adrs
+        self.joint_limits = arm_joint_limits
+        self.continuous_indices = continuous_indices or []
+        self.n_arm = len(arm_qpos_adrs)
+
+        self.max_iters = max_iters
+        self.pos_tol = pos_tol
+        self.ori_weight = ori_weight
+        self.initial_lambda = initial_lambda
+
+        self.jacp = np.zeros((3, self.model.nv))
+        self.jacr = np.zeros((3, self.model.nv))
+        self.eye = np.eye(self.n_arm)
+
+        self.stall_threshold = 1e-6
+        self.stall_patience = 5
+        self.last_iterations = 0
+
+    def solve(
+        self,
+        target_pos: np.ndarray,
+        target_vec: np.ndarray | None = None,
+        q_seed: np.ndarray | None = None,
+        active_dof: int | None = None,
+    ) -> np.ndarray:
+        if active_dof is None:
+            active_dof = self.n_arm
+        target_pos = np.asarray(target_pos, dtype=float)
+        if target_vec is not None:
+            target_vec = np.asarray(target_vec, dtype=float)
+            target_vec = target_vec / np.linalg.norm(target_vec)
+
+        qpos_save = self.data.qpos.copy()
+        qvel_save = self.data.qvel.copy()
+        q_current = np.array([self.data.qpos[a] for a in self.arm_qpos_adrs], dtype=float)
+        seeds = self._build_seeds(q_seed)
+
+        if active_dof < self.n_arm:
+            for s in seeds:
+                s[active_dof:] = q_current[active_dof:]
+
+        results = []
+        for seed in seeds:
+            q, iters, perr, oerr = self._solve_single(target_pos, target_vec, seed, active_dof)
+            
+            q = shortest_joint_configuration(q_current, q, self.continuous_indices)
+            
+            results.append((q.copy(), iters, perr, oerr))
+
+        valid_results = [r for r in results if r[2] < 0.01]
+        if valid_results:
+            valid_results.sort(key=lambda r: r[3])
+            best_ori_err = valid_results[0][3]
+            top_results = [r for r in valid_results if r[3] <= best_ori_err + 0.0174] # 1 degree
+            
+            # Heavier weight on joint-space distance to prevent configuration flips
+            j_weights = np.array([5.0, 2.0, 2.0, 1.0])
+            top_results.sort(
+                key=lambda r: joint_distance(r[0] * j_weights, q_current * j_weights, self.continuous_indices)
+            )
+            best_q, best_iters, best_pos_err, best_ori_err = top_results[0]
+        else:
+            results.sort(key=lambda r: r[2])
+            best_q, best_iters, best_pos_err, best_ori_err = results[0]
+
+        self.last_iterations = best_iters
+
+        self.data.qpos[:] = qpos_save
+        self.data.qvel[:] = qvel_save
+        mujoco.mj_forward(self.model, self.data)
+
+        return best_q
+
+    def _solve_single(
+        self,
+        target_pos: np.ndarray,
+        target_vec: np.ndarray | None,
+        q_start: np.ndarray,
+        active_dof: int,
+    ) -> tuple[np.ndarray, int, float, float]:
+        q_arm = q_start.copy()
+        for i_arm, adr in enumerate(self.arm_qpos_adrs):
+            self.data.qpos[adr] = q_arm[i_arm]
+        mujoco.mj_forward(self.model, self.data)
+
+        lam = self.initial_lambda
+        v = 2.0
+        best_err = float('inf')
+        stalls = 0
+
+        for it in range(self.max_iters):
+            ee_pos = np.array(self.data.site_xpos[self.ee_site_id], dtype=float)
+            ee_xmat = np.array(self.data.site_xmat[self.ee_site_id], dtype=float).reshape(3, 3)
+            current_vec = ee_xmat[:, 0]
+
+            pos_err_vec = target_pos - ee_pos
+            pos_err_norm = float(np.linalg.norm(pos_err_vec))
+
+            if target_vec is not None:
+                ori_err_vec = _orientation_error_vector(target_vec, current_vec)
+                ori_err_norm = float(np.linalg.norm(ori_err_vec))
+                residual = np.concatenate([pos_err_vec, self.ori_weight * ori_err_vec])
+                cost = 0.5 * np.sum(residual**2)
+            else:
+                ori_err_norm = 0.0
+                residual = pos_err_vec
+                cost = 0.5 * np.sum(residual**2)
+
+            if pos_err_norm < self.pos_tol:
+                return q_arm, it + 1, pos_err_norm, ori_err_norm
+
+            if cost >= best_err:
+                lam *= v
+                v *= 2.0
+            else:
+                lam *= max(1.0 / 3.0, 1.0 - (2.0 * (best_err - cost) / cost)**3)
+                v = 2.0
+                best_err = cost
+
+            if cost > 0 and abs(best_err - cost) < self.stall_threshold:
+                stalls += 1
+                if stalls >= self.stall_patience:
+                    break
+            else:
+                stalls = 0
+
+            mujoco.mj_jacSite(self.model, self.data, self.jacp, self.jacr, self.ee_site_id)
+            cols = self.arm_qvel_adrs[:active_dof]
+            J = self.jacp[:, cols]
+            if target_vec is not None:
+                J = np.vstack([J, self.ori_weight * self.jacr[:, cols]])
+
+            H = J.T @ J
+            g = J.T @ residual
+            H_lm = H + lam * np.eye(active_dof)
+
+            import numpy.linalg as nla
+            try:
+                dq = nla.solve(H_lm, g)
+            except nla.LinAlgError:
+                dq = nla.lstsq(H_lm, g, rcond=None)[0]
+
+            q_arm[:active_dof] = q_arm[:active_dof] + dq
+
+            for j in range(self.n_arm):
+                lo, hi = self.joint_limits[j]
+                if np.isfinite(lo) or np.isfinite(hi):
+                    q_arm[j] = float(np.clip(q_arm[j], lo, hi))
+
+            for i_arm, adr in enumerate(self.arm_qpos_adrs):
+                self.data.qpos[adr] = q_arm[i_arm]
+            mujoco.mj_forward(self.model, self.data)
+
+        ee_pos = np.array(self.data.site_xpos[self.ee_site_id], dtype=float)
+        ee_xmat = np.array(self.data.site_xmat[self.ee_site_id], dtype=float).reshape(3, 3)
+        pos_err_norm = float(np.linalg.norm(target_pos - ee_pos))
+        ori_err_norm = 0.0
+        if target_vec is not None:
+            ori_err_vec = _orientation_error_vector(target_vec, ee_xmat[:, 0])
+            ori_err_norm = float(np.linalg.norm(ori_err_vec))
+
+        return q_arm, self.max_iters, pos_err_norm, ori_err_norm
+
+    def _build_seeds(self, q_seed: np.ndarray | None) -> list[np.ndarray]:
+        """Return a simplified set of seeds to favor the current configuration."""
+        q_current = np.array([self.data.qpos[a] for a in self.arm_qpos_adrs], dtype=float)
+        y0 = float(q_current[0])
+        yaw_bases = [y0, y0 + 1.57, y0 - 1.57, y0 + 3.14]
+        if q_seed is not None:
+            y_seed = float(q_seed[0])
+            yaw_bases = [y_seed, y_seed + 1.57, y_seed - 1.57, y_seed + 3.14]
+        yaw_bases = [(y + 3.14159) % (2 * 3.14159) - 3.14159 for y in yaw_bases]
+
+        pitch_vals = [1.5, -1.5, 3.14, -3.14]
+        seeds = []
+        for yaw in yaw_bases:
+            for p1 in pitch_vals:
+                for p2 in pitch_vals:
+                    s = q_current.copy()
+                    s[0], s[1], s[2] = yaw, p1, p2
+                    # Note: We leave s[3] as it is (q_current[3]) to avoid unwanted jumps
+                    seeds.append(s)
+
+        import random as _rng
+        for _ in range(50):
+            s = q_current.copy()
+            for j in range(self.n_arm):
+                lo, hi = self.joint_limits[j]
+                if np.isfinite(lo) and np.isfinite(hi):
+                    s[j] = _rng.uniform(lo, hi)
+                else:
+                    s[j] = _rng.uniform(-3.14, 3.14)
+            seeds.append(s)
+
+        if q_seed is not None:
+            seeds.insert(0, np.array(q_seed[:self.n_arm], dtype=float))
+            
+        return seeds
 
 class KinovaMuJoCoBackend(KinovaBackend):
     """MuJoCo backend with computed-torque control and jerk-limited trajectories."""
@@ -158,11 +417,13 @@ class KinovaMuJoCoBackend(KinovaBackend):
                 )
 
         self._joint_limits = []
-        for jid in self._joint_ids:
+        self._continuous_indices = []
+        for idx, jid in enumerate(self._joint_ids):
             if model.jnt_limited[jid]:
                 low, high = model.jnt_range[jid]
             else:
                 low, high = -np.inf, np.inf
+                self._continuous_indices.append(idx)
             self._joint_limits.append((float(low), float(high)))
 
         self._finger_indices = [
@@ -264,19 +525,35 @@ class KinovaMuJoCoBackend(KinovaBackend):
 
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
         self._require_env()
-        n_arm = self.arm_dof
-        if len(q_des) < n_arm:
-            raise ValueError(f"Expected at least {n_arm} arm joint targets, got {len(q_des)}.")
-        q_arm = np.array(q_des[: n_arm], dtype=float)
-        # Preserve existing finger targets, only update arm joints
+        q_curr = self.get_joint_angles_rad()
+        
+        # Decide if we got arm-only or full joint list
+        n_arm = len(self._arm_indices)
+        is_arm_only = len(q_des) == n_arm
+        
         q_full = self._require_q_target_desired().copy()
-        for local_idx, joint_idx in enumerate(self._arm_indices):
-            q_full[joint_idx] = q_arm[local_idx]
+        q_des_wrapped = list(q_des)
+
+        # Wrap continuous joints for shortest path relative to current state
+        for idx in self._continuous_indices:
+            # Only wrap if the joint is actually in the provided q_des
+            # (Continuous indices are relative to the full joint list)
+            if idx < len(q_des_wrapped):
+                diff = q_des_wrapped[idx] - q_curr[idx]
+                q_des_wrapped[idx] -= 2 * np.pi * np.round(diff / (2 * np.pi))
+
+        if is_arm_only:
+            # Update only arm joints in the full target array
+            for i_local, idx_in_full in enumerate(self._arm_indices):
+                q_full[idx_in_full] = q_des_wrapped[i_local]
+            target_arm = np.array(q_des_wrapped, dtype=float)
+        else:
+            # Use the full provided list (wrapped)
+            q_full = np.array(q_des_wrapped, dtype=float)
+            target_arm = np.array([q_full[i] for i in self._arm_indices], dtype=float)
+
         self._q_target_desired = self._clip_q(q_full)
-        # Update trajectory generator goal
-        if self._traj_gen is not None:
-            q_arm_goal = np.array([self._q_target_desired[i] for i in self._arm_indices])
-            self._traj_gen.set_goal(q_arm_goal)
+        self._traj_gen.set_goal(target_arm)
 
     def step(
         self,
@@ -408,8 +685,14 @@ class KinovaMuJoCoBackend(KinovaBackend):
         return bool(arm_pos_err <= float(pos_tol_rad) and arm_vel <= float(vel_tol_rad_s))
 
     def get_joint_angles_rad(self) -> list[float]:
-        env = self._require_env()
-        return [float(env.data.qpos[adr]) for adr in self._qpos_adr]
+        self._require_env()
+        return [float(self._env.data.qpos[adr]) for adr in self._qpos_adr]
+
+    def get_target_joint_angles_rad(self) -> list[float]:
+        """Read current target joint angles (arm only) in radians."""
+        q_target = self._require_q_target_desired()
+        # Return only the arm joint components as a list
+        return [float(q_target[i]) for i in self._arm_indices]
 
     def get_joint_vel_rad(self) -> list[float]:
         env = self._require_env()
@@ -459,158 +742,93 @@ class KinovaMuJoCoBackend(KinovaBackend):
         }
 
 
+
+    def _get_ik_solver(self):
+        if not hasattr(self, '_ik_solver') or self._ik_solver is None:
+            self._ik_solver = LevenbergMarquardtIK(
+                model=self._require_env().model,
+                data=self._require_env().data,
+                ee_site_id=self._ee_site_id,
+                arm_qpos_adrs=[self._qpos_adr[i] for i in self._arm_indices],
+                arm_qvel_adrs=[self._qvel_adr[i] for i in self._arm_indices],
+                arm_joint_limits=[self._joint_limits[i] for i in self._arm_indices]
+            )
+        return self._ik_solver
+
     def solve_ik(
         self,
         target_pos: Sequence[float],
         target_quat: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
         """Solve inverse kinematics for the requested Cartesian pose."""
-        env = self._require_env()
-        model = env.model
-        data = env.data
-
-        target_pos_arr = np.array(target_pos, dtype=float)
-        if target_pos_arr.shape != (3,):
-            raise ValueError("target_pos must have 3 elements.")
-
         target_quat_arr = np.array(target_quat, dtype=float)
-        if target_quat_arr.shape != (4,):
-            raise ValueError("target_quat must have 4 elements [qx, qy, qz, qw].")
         quat_norm = float(np.linalg.norm(target_quat_arr))
-        if quat_norm < 1e-8:
-            raise ValueError("target_quat must have non-zero norm.")
-        target_quat_arr = target_quat_arr / quat_norm
-        target_quat_wxyz = np.array(
-            [target_quat_arr[3], target_quat_arr[0], target_quat_arr[1], target_quat_arr[2]],
-            dtype=float,
-        )
-
-        qpos_initial = data.qpos.copy()
-        qvel_initial = data.qvel.copy()
-
-        if q_seed is not None:
-            if len(q_seed) < self.dof:
-                raise ValueError(f"Expected at least {self.dof} seed joints, got {len(q_seed)}.")
-            q = np.array(q_seed[: self.dof], dtype=float)
+        if quat_norm > 1e-8:
+            target_quat_arr = target_quat_arr / quat_norm
         else:
-            q = np.array([data.qpos[adr] for adr in self._qpos_adr], dtype=float)
-        q_arm = q[self._arm_indices].copy()
-
-        jacp = np.zeros((3, model.nv), dtype=float)
-        jacr = np.zeros((3, model.nv), dtype=float)
-        orientation_weight = IK_ORIENTATION_WEIGHT
-
-        for it in range(IK_MAX_ITERS):
-            data.qpos[:] = qpos_initial
-            for idx, adr in enumerate(self._qpos_adr):
-                data.qpos[adr] = q[idx]
-            mujoco.mj_forward(model, data)
-
-            pos, quat = self._get_ee_pose_wxyz(data)
-
-            pos_err = target_pos_arr - pos
-            rot_err = self._quat_error_vector(target_quat_wxyz, quat)
-
-            if np.linalg.norm(pos_err) <= IK_POS_TOL and np.linalg.norm(rot_err) <= IK_ROT_TOL:
-                self._last_ik_iterations = it + 1
-                break
-
-            self._fill_jacobian(model, data, jacp, jacr)
-            cols = self._arm_dof_adrs
-            jac = np.vstack((jacp[:, cols], jacr[:, cols]))
-
-            error = np.concatenate((pos_err, rot_err))
-            jac[:3, :] *= 1.0
-            jac[3:, :] *= orientation_weight
-            error[3:] *= orientation_weight
-
-            jjt = jac @ jac.T
-            damping = IK_DAMPING * IK_DAMPING * np.eye(6)
-            dq = jac.T @ np.linalg.solve(jjt + damping, error)
-            q_arm = q_arm + IK_STEP_SIZE * dq
-
-            for local_idx, joint_idx in enumerate(self._arm_indices):
-                low, high = self._joint_limits[joint_idx]
-                if np.isfinite(low) or np.isfinite(high):
-                    q_arm[local_idx] = float(np.clip(q_arm[local_idx], low, high))
-
-            q[self._arm_indices] = q_arm
-        else:
-            self._last_ik_iterations = IK_MAX_ITERS
-
-        data.qpos[:] = qpos_initial
-        data.qvel[:] = qvel_initial
-        mujoco.mj_forward(model, data)
-        return [float(q[idx]) for idx in self._arm_indices]
+            target_quat_arr = np.array([1.0, 0.0, 0.0, 0.0])
+            
+        # Convert quat (xyzw) to rotation matrix to extract the target X-axis (direction out of gripper)
+        from scipy.spatial.transform import Rotation
+        try:
+            r = Rotation.from_quat(target_quat_arr)
+            # MuJoCo is wxyz, but standard scipy is xyzw. Since the user might pass wxyz or xyzw, let's just 
+            # use our custom _quat_multiply or assume it's wxyz based on _get_ee_pose_wxyz.
+            pass
+        except:
+            pass
+            
+        # For simplicity, if they call solve_ik, we can map it to our 5-DOF IK by extracting 
+        # the X-axis from the quaternion. But since the previous API expects WXYZ or XYZW, 
+        # let's just explicitly compute the rotation matrix.
+        
+        qw, qx, qy, qz = target_quat_arr if len(target_quat_arr)==4 else (1,0,0,0)
+        # Assuming wxyz (based on existing backend code `target_quat_wxyz = np.array([target_quat_arr[3], target_quat_arr[0]...`)
+        # Wait, existing code: target_quat_arr[3] is w, so it's xyzw.
+        qx, qy, qz, qw = target_quat_arr
+        
+        # rotation matrix first column (x-axis)
+        target_x = np.array([
+            1 - 2*qy**2 - 2*qz**2,
+            2*qx*qy + 2*qz*qw,
+            2*qx*qz - 2*qy*qw
+        ])
+        
+        active_dof = self.arm_dof if move_wrist else self.arm_dof - 1
+        solver = self._get_ik_solver()
+        best_q = solver.solve(np.array(target_pos), target_x, q_seed, active_dof=active_dof)
+        self._last_ik_iterations = solver.last_iterations
+        return [float(x) for x in best_q]
 
     def solve_ik_position_only(
         self,
         target_pos: Sequence[float],
         q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
     ) -> list[float]:
-        """Solve IK for position only (no orientation constraint).
+        """Solve IK for position only (no orientation constraint)."""
+        active_dof = self.arm_dof if move_wrist else self.arm_dof - 1
+        solver = self._get_ik_solver()
+        best_q = solver.solve(np.array(target_pos), None, q_seed, active_dof=active_dof)
+        self._last_ik_iterations = solver.last_iterations
+        return [float(x) for x in best_q]
 
-        Uses only the 3×N_arm positional Jacobian.  With a 4-DOF arm this
-        gives 1 redundant DOF, allowing good reachability.
-        """
-        env = self._require_env()
-        model = env.model
-        data = env.data
+    def solve_ik_z_down(
+        self,
+        target_pos: Sequence[float],
+        q_seed: Sequence[float] | None = None,
+        move_wrist: bool = True,
+    ) -> list[float]:
+        """Solve IK for position accuracy while pointing straight down."""
+        active_dof = self.arm_dof if move_wrist else self.arm_dof - 1
+        solver = self._get_ik_solver()
+        # Downward vector is -Z in world coords
+        best_q = solver.solve(np.array(target_pos), np.array([0.0, 0.0, -1.0]), q_seed, active_dof=active_dof)
+        self._last_ik_iterations = solver.last_iterations
+        return [float(x) for x in best_q]
 
-        target_pos_arr = np.array(target_pos, dtype=float)
-        if target_pos_arr.shape != (3,):
-            raise ValueError("target_pos must have 3 elements.")
-
-        qpos_initial = data.qpos.copy()
-        qvel_initial = data.qvel.copy()
-
-        if q_seed is not None:
-            if len(q_seed) < self.dof:
-                raise ValueError(f"Expected at least {self.dof} seed joints, got {len(q_seed)}.")
-            q = np.array(q_seed[: self.dof], dtype=float)
-        else:
-            q = np.array([data.qpos[adr] for adr in self._qpos_adr], dtype=float)
-        q_arm = q[self._arm_indices].copy()
-
-        jacp = np.zeros((3, model.nv), dtype=float)
-        jacr = np.zeros((3, model.nv), dtype=float)  # needed for API but unused
-
-        for it in range(IK_MAX_ITERS):
-            data.qpos[:] = qpos_initial
-            for idx, adr in enumerate(self._qpos_adr):
-                data.qpos[adr] = q[idx]
-            mujoco.mj_forward(model, data)
-
-            pos, _ = self._get_ee_pose_wxyz(data)
-            pos_err = target_pos_arr - pos
-
-            if np.linalg.norm(pos_err) <= IK_POS_TOL:
-                self._last_ik_iterations = it + 1
-                break
-
-            self._fill_jacobian(model, data, jacp, jacr)
-            cols = self._arm_dof_adrs
-            jac_pos = jacp[:, cols]  # 3 × N_arm
-
-            jjt = jac_pos @ jac_pos.T
-            damping = IK_DAMPING * IK_DAMPING * np.eye(3)
-            dq = jac_pos.T @ np.linalg.solve(jjt + damping, pos_err)
-            q_arm = q_arm + IK_STEP_SIZE * dq
-
-            for local_idx, joint_idx in enumerate(self._arm_indices):
-                low, high = self._joint_limits[joint_idx]
-                if np.isfinite(low) or np.isfinite(high):
-                    q_arm[local_idx] = float(np.clip(q_arm[local_idx], low, high))
-
-            q[self._arm_indices] = q_arm
-        else:
-            self._last_ik_iterations = IK_MAX_ITERS
-
-        data.qpos[:] = qpos_initial
-        data.qvel[:] = qvel_initial
-        mujoco.mj_forward(model, data)
-        return [float(q[idx]) for idx in self._arm_indices]
 
     def get_end_effector_pose(
         self,

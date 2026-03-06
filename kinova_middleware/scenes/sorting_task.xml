@@ -12,7 +12,7 @@
     <!-- Basket A: Red Bin (Left side of robot) -->
     <body name="red_bin" pos="0 0.35 0.01">
       <!-- Target site for IK placement above basket -->
-      <site name="red_bin_target" pos="0 0 0.25" size="0.01" rgba="1 0 0 0.5" type="sphere"/>
+      <site name="red_bin_target" pos="0 0 0.22" size="0.01" rgba="1 0 0 0.5" type="sphere"/>
       <!-- Base (Z half-size 0.01) -->
       <geom name="red_bin_base" type="box" size="0.1 0.1 0.01" rgba="1 0.6 0.6 1" friction="1 0.1 0.05" condim="3"/>
       <!-- Walls (Z half-size 0.05, placing center at Z=0.06 relative to bin center so it sits on top of the base) -->
@@ -25,7 +25,7 @@
     <!-- Basket B: Blue Bin (Right side of robot) -->
     <body name="blue_bin" pos="0 -0.35 0.01">
       <!-- Target site for IK placement above basket -->
-      <site name="blue_bin_target" pos="0 0 0.25" size="0.01" rgba="0 0 1 0.5" type="sphere"/>
+      <site name="blue_bin_target" pos="0 0 0.22" size="0.01" rgba="0 0 1 0.5" type="sphere"/>
       <geom name="blue_bin_base" type="box" size="0.1 0.1 0.01" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
       <geom name="blue_bin_wall1" type="box" pos="0 0.09 0.06" size="0.1 0.01 0.05" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
       <geom name="blue_bin_wall2" type="box" pos="0 -0.09 0.06" size="0.1 0.01 0.05" rgba="0.6 0.6 1 1" friction="1 0.1 0.05" condim="3"/>
