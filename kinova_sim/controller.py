@@ -77,8 +77,19 @@ class ComputedTorqueController:
         # --- PD correction in acceleration space ---
         e = q_des - q
         ed = qd_des - qd
+        
+        # Hard check for any NaN/Inf propagating into PD math
+        if not np.all(np.isfinite(e)) or not np.all(np.isfinite(ed)):
+            raise ValueError(f"Non-finite PD tracking errors: e={e}, ed={ed}")
+            
         qdd_pd = self.Kp * e + self.Kd * ed
+        
+        if not np.all(np.isfinite(qdd_pd)):
+            raise ValueError(f"Non-finite qdd_pd: {qdd_pd}")
+            
         qdd_cmd = qdd_des + qdd_pd
+        QDD_MAX = np.array([8.0, 8.0, 8.0, 8.0], dtype=float)
+        qdd_cmd = np.clip(qdd_cmd, -QDD_MAX, QDD_MAX)
 
         # --- Build full-nv qacc vector (arm entries only, rest zero) ---
         qacc_full = np.zeros(nv, dtype=np.float64)
@@ -96,7 +107,35 @@ class ComputedTorqueController:
         # MuJoCo applies damping/friction internally during mj_step, so
         # we must add feedforward compensation here.
         bias = np.array(data.qfrc_bias, dtype=np.float64)
+        
+        # Explicit bounds and sanity checks BEFORE inverse dynamics
+        if not np.all(np.isfinite(q_des)):
+            raise ValueError(f"q_des contains non-finite values: {q_des}")
+        if not np.all(np.isfinite(qd_des)):
+            raise ValueError(f"qd_des contains non-finite values: {qd_des}")
+        if not np.all(np.isfinite(qdd_des)):
+            raise ValueError(f"qdd_des contains non-finite values: {qdd_des}")
+        if not np.all(np.isfinite(q)):
+            raise ValueError(f"q contains non-finite values: {q}")
+        if not np.all(np.isfinite(qd)):
+            raise ValueError(f"qd contains non-finite values: {qd}")
+        if not np.all(np.isfinite(M)):
+            raise ValueError("Mass matrix M contains non-finite values")
+        if not np.all(np.isfinite(bias)):
+            raise ValueError(f"qfrc_bias contains non-finite values: {bias}")
+        if not np.all(np.isfinite(qacc_full)):
+            raise ValueError(f"qacc_full contains non-finite values: {qacc_full}")
+        if not np.all(np.isfinite(qdd_cmd)):
+            raise ValueError(f"Non-finite qdd_cmd: {qdd_cmd}")
+            
+        # Reject absurd commanded accelerations that could cause torque matrix explosion
+        if np.max(np.abs(qacc_full)) > 100.0:
+            raise ValueError(f"qacc_full bounds exceeded (max 100.0): {qacc_full}")
+
         tau_full = M @ qacc_full + bias
+
+        if not np.all(np.isfinite(tau_full)):
+            raise ValueError(f"tau_full resulted in non-finite torques: M={M}, qacc={qacc_full}, bias={bias}")
 
         # --- Damping + friction feedforward for arm DOFs ---
         # Instead of canceling current damping (which leaves PD to do all the work
@@ -115,3 +154,4 @@ class ComputedTorqueController:
         tau_arm = np.array([tau_full[adr] for adr in self.arm_dof_adrs], dtype=float)
 
         return tau_arm, qdd_pd, qdd_cmd
+

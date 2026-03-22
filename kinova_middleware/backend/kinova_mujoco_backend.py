@@ -53,18 +53,43 @@ IK_POS_TOL = 1e-3
 IK_ROT_TOL = 1e-2
 IK_DAMPING = 1e-2
 IK_STEP_SIZE = 0.8
-IK_ORIENTATION_WEIGHT = 0.01
+IK_ORIENTATION_WEIGHT = 0.15
 
 def wrap_to_pi(angle):
     return (angle + np.pi) % (2*np.pi) - np.pi
 
-def joint_distance(q1, q2, continuous_indices):
+def joint_distance(
+    q1: np.ndarray,
+    q2: np.ndarray,
+    continuous_indices: list[int],
+    weights: np.ndarray | None = None,
+) -> float:
+    """
+    Compute shortest-path joint distance between two configurations.
+
+    Continuous joints are wrapped to [-pi, pi] before distance calculation.
+
+    Args:
+        q1: first joint configuration
+        q2: second joint configuration
+        continuous_indices: indices of continuous joints
+        weights: optional weighting vector
+
+    Returns:
+        Euclidean joint distance
+    """
+
     diff = q1 - q2
 
+    # Wrap continuous joints
     for idx in continuous_indices:
         diff[idx] = wrap_to_pi(diff[idx])
 
-    return np.linalg.norm(diff)
+    # Apply weights AFTER wrapping
+    if weights is not None:
+        diff = diff * weights
+
+    return float(np.linalg.norm(diff))
 
 def shortest_joint_configuration(q_current, q_solution, continuous_indices):
     q_fixed = q_solution.copy()
@@ -224,8 +249,12 @@ class LevenbergMarquardtIK:
                 residual = pos_err_vec
                 cost = 0.5 * np.sum(residual**2)
 
-            if pos_err_norm < self.pos_tol:
-                return q_arm, it + 1, pos_err_norm, ori_err_norm
+            if target_vec is None:
+                if pos_err_norm < self.pos_tol:
+                    return q_arm, it + 1, pos_err_norm, 0.0
+            else:
+                if pos_err_norm < self.pos_tol and ori_err_norm < 0.05:
+                    return q_arm, it + 1, pos_err_norm, ori_err_norm
 
             if cost >= best_err:
                 lam *= v
@@ -509,6 +538,22 @@ class KinovaMuJoCoBackend(KinovaBackend):
         self._traj_gen = None
         self._governor = None
 
+    def reset_scene(self) -> None:
+        """Reset the simulation scene and controller state."""
+        env = self._require_env()
+        env.reset()
+        
+        if self._initial_keyframe:
+            env.set_model_keyframe(self._initial_keyframe)
+            
+        # Re-read initial state from data after reset
+        q_init = np.array([float(env.data.qpos[adr]) for adr in self._qpos_adr], dtype=float)
+        self._q_target_desired = q_init.copy()
+        
+        # Reset trajectory generator so the arm doesn't snap to the previous target
+        q_arm_init = np.array([q_init[i] for i in self._arm_indices], dtype=float)
+        self._traj_gen.reset(q_arm_init)
+
     def move_home(self) -> None:
         env = self._require_env()
         target = None
@@ -527,6 +572,8 @@ class KinovaMuJoCoBackend(KinovaBackend):
         self._require_env()
         q_curr = self.get_joint_angles_rad()
         
+        
+        
         # Decide if we got arm-only or full joint list
         n_arm = len(self._arm_indices)
         is_arm_only = len(q_des) == n_arm
@@ -542,6 +589,26 @@ class KinovaMuJoCoBackend(KinovaBackend):
                 diff = q_des_wrapped[idx] - q_curr[idx]
                 q_des_wrapped[idx] -= 2 * np.pi * np.round(diff / (2 * np.pi))
 
+
+        q_curr = np.array(self.get_joint_angles_rad(), dtype=float)
+
+        if is_arm_only:
+            j1_curr = q_curr[self._arm_indices[0]]
+            j1_cmd = q_des_wrapped[0]
+        else:
+            j1_curr = q_curr[0]
+            j1_cmd = q_des_wrapped[0]
+
+        j1_raw_delta = j1_cmd - j1_curr
+        j1_wrapped_delta = wrap_to_pi(j1_raw_delta)
+
+        print(f"J1 current: {j1_curr:.6f}")
+        print(f"J1 command: {j1_cmd:.6f}")
+        print(f"J1 raw delta: {j1_raw_delta:.6f}")
+        print(f"J1 wrapped delta: {j1_wrapped_delta:.6f}")
+        print(f"J1 raw delta deg: {np.degrees(j1_raw_delta):.2f}")
+        print(f"J1 wrapped delta deg: {np.degrees(j1_wrapped_delta):.2f}")
+        
         if is_arm_only:
             # Update only arm joints in the full target array
             for i_local, idx_in_full in enumerate(self._arm_indices):
@@ -551,7 +618,7 @@ class KinovaMuJoCoBackend(KinovaBackend):
             # Use the full provided list (wrapped)
             q_full = np.array(q_des_wrapped, dtype=float)
             target_arm = np.array([q_full[i] for i in self._arm_indices], dtype=float)
-
+        
         self._q_target_desired = self._clip_q(q_full)
         self._traj_gen.set_goal(target_arm)
 
@@ -587,6 +654,14 @@ class KinovaMuJoCoBackend(KinovaBackend):
 
         # ══ c) Advance trajectory generator ═══════════════════════════
         q_des, qd_des, qdd_des = traj.update()
+        
+        # ── SANITY CHECKS ──
+        if not (np.all(np.isfinite(q_des)) and np.all(np.isfinite(qd_des)) and np.all(np.isfinite(qdd_des))):
+            raise ValueError(f"Trajectory generator emitted non-finite values: q_des={q_des}, qd_des={qd_des}, qdd_des={qdd_des}")
+        
+        if np.max(np.abs(qdd_des)) > 100.0:
+            raise ValueError(f"Trajectory generator emitted absurd acceleration limits (max 100.0): qdd_des={qdd_des}")
+
 
         # ══ d) Computed torque controller (arm) — produces RAW torque ═
         tau_arm_raw, qdd_pd, qdd_cmd = self._ct_controller.compute(
@@ -744,15 +819,31 @@ class KinovaMuJoCoBackend(KinovaBackend):
 
 
     def _get_ik_solver(self):
-        if not hasattr(self, '_ik_solver') or self._ik_solver is None:
+        """
+        Lazily construct the IK solver with correct arm-local continuous joints.
+        """
+
+        if not hasattr(self, "_ik_solver") or self._ik_solver is None:
+
+            # Convert continuous indices from full joint indexing → arm indexing
+            arm_continuous_indices = [
+                i_arm
+                for i_arm, idx_full in enumerate(self._arm_indices)
+                if idx_full in self._continuous_indices
+            ]
+            print("full continuous:", self._continuous_indices)
+            print("arm continuous:", arm_continuous_indices)
+
             self._ik_solver = LevenbergMarquardtIK(
                 model=self._require_env().model,
                 data=self._require_env().data,
                 ee_site_id=self._ee_site_id,
                 arm_qpos_adrs=[self._qpos_adr[i] for i in self._arm_indices],
                 arm_qvel_adrs=[self._qvel_adr[i] for i in self._arm_indices],
-                arm_joint_limits=[self._joint_limits[i] for i in self._arm_indices]
+                arm_joint_limits=[self._joint_limits[i] for i in self._arm_indices],
+                continuous_indices=arm_continuous_indices,
             )
+
         return self._ik_solver
 
     def solve_ik(
@@ -762,7 +853,14 @@ class KinovaMuJoCoBackend(KinovaBackend):
         q_seed: Sequence[float] | None = None,
         move_wrist: bool = True,
     ) -> list[float]:
-        """Solve inverse kinematics for the requested Cartesian pose."""
+        """Solve inverse kinematics for the requested Cartesian pose.
+        
+        If move_wrist=False, the requested quaternion is advisory/ignored 
+        and the solve purely targets position-only to preserve the wrist joint.
+        """
+        if not move_wrist:
+            return self.solve_ik_position_only(target_pos, q_seed, move_wrist=False)
+
         target_quat_arr = np.array(target_quat, dtype=float)
         quat_norm = float(np.linalg.norm(target_quat_arr))
         if quat_norm > 1e-8:

@@ -23,13 +23,13 @@ SERVER_URL = "http://127.0.0.1:8000/mcp"
 DEST_X, DEST_Y = 0.20, -0.20       # tower destination (world XY)
 
 PREGRASP_Z   = 0.08                 # above cube top before descending
-GRASP_OFFSET = 0.008                # above cube top when grasping
+GRASP_OFFSET = 0.009                # above cube top when grasping
 LIFT_Z       = 0.20                 # above cube top after grasping
 PREPLACE_Z   = 0.10                 # above target z before descending
 PLACE_Z      = 0.04                 # above target z when releasing
 RETREAT_Z    = 0.10                 # above target z after releasing
 
-STACK_MARGIN = 0.002                # gap between stacked layers
+STACK_MARGIN = 0.01                # gap between stacked layers
 MAX_STACK_Z  = 0.30                 # workspace ceiling
 
 POS_QUAT = [0.0, 0.0, 0.0, 0.0]    # triggers position-only IK
@@ -86,6 +86,7 @@ async def main():
         # ── Pick-and-place loop ──────────────────────────────
         stack = 0
         results = []
+        base_yaw = None
 
         for i, cube in enumerate(cubes):
             name = cube["body_name"]
@@ -160,7 +161,7 @@ async def main():
             # 7. Lift (maintain orientation)
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [x, y, z_top + LIFT_Z],
-                "target_quat": grasp_quat,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Lift      err={r.get('pos_err', 0):.4f}m", 1)
 
@@ -176,18 +177,41 @@ async def main():
                 continue
             log(f"  ✓ Grasp OK (z {z:.3f} → {new_z:.3f})", 1)
 
+            # 8.5 Align rotation with base cube
+            held_pose = p(await client.call_tool("get_object_pose", {"body_name": name}))
+            hq = held_pose.get("quaternion", {})
+            qw, qx, qy, qz = hq.get("qw", 1), hq.get("qx", 0), hq.get("qy", 0), hq.get("qz", 0)
+            current_yaw = math.atan2(2.0*(qw*qz + qx*qy), 1.0 - 2.0*(qy*qy + qz*qz))
+            
+            if stack == 0:
+                base_yaw = current_yaw
+            elif base_yaw is not None:
+                diff_yaw = base_yaw - current_yaw
+                diff_yaw = (diff_yaw + math.pi) % (2.0 * math.pi) - math.pi
+                diff_deg = math.degrees(diff_yaw)
+                
+                # Check for 90-degree symmetries (cubes are symmetric)
+                # diff_deg = ((diff_deg + 45.0) % 90.0) - 45.0
+                
+                # Actually, wait, cubes are symmetric so we only need to rotate by up to 45 degrees
+                # if we just want them squarely aligned. But aligning exactly to base_yaw is fine too.
+                # Let's just use diff_deg as is, so the cube faces exactly the same way (faces/textures match).
+                if abs(diff_deg) > 1.0:
+                    log(f"  Align stack {diff_deg:.1f}°", 1)
+                    await client.call_tool("rotate_wrist", {"angle_deg": diff_deg})
+
             # ═══════════════ PLACE ═══════════════════════════
             # 9. Preplace (maintain orientation)
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [DEST_X, DEST_Y, target_z + PREPLACE_Z],
-                "target_quat": grasp_quat,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Preplace  err={r.get('pos_err', 0):.4f}m", 1)
 
             # 10. Place descend
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [DEST_X, DEST_Y, target_z + PLACE_Z],
-                "target_quat": grasp_quat,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Place     err={r.get('pos_err', 0):.4f}m", 1)
 
@@ -198,7 +222,7 @@ async def main():
             # 12. Retreat
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [DEST_X, DEST_Y, target_z + RETREAT_Z],
-                "target_quat": grasp_quat,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Retreat   err={r.get('pos_err', 0):.4f}m", 1)
 
@@ -209,14 +233,51 @@ async def main():
             # Home between cubes
             await client.call_tool("move_home")
 
+        # ── Verification ─────────────────────────────────────
+        log("\n[2] Verifying stack …")
+        await asyncio.sleep(1.0) # Let physics settle
+
+        stacked_count = 0
+        for i, cube in enumerate(cubes):
+            name = cube["body_name"]
+            
+            # Re-query final position
+            final = p(await client.call_tool("get_object_pose", {"body_name": name}))
+            if final.get("status") == "error":
+                continue
+                
+            pos = final["position"]
+            x, y, z = pos["x"], pos["y"], pos["z"]
+            
+            # Calculate expected Z based on layer index and size
+            hh = cube.get("size", [0.03, 0.03, 0.03])[2] if len(cube.get("size", [])) >= 3 else 0.03
+            ch = 2.0 * hh
+            expected_z = table_z + hh + i * (ch + STACK_MARGIN)
+            
+            xy_err = math.hypot(x - DEST_X, y - DEST_Y)
+            z_err = abs(z - expected_z)
+            
+            log(f"  • {name:15s}  at ({x:.3f}, {y:.3f}, {z:.3f})")
+            
+            # Determine if it's successfully stacked within tolerances
+            if xy_err < 0.04 and z_err < 0.02:
+                log(f"    ✓ Verified stacked at layer {i} (XY err: {xy_err:.3f}m, Z err: {z_err:.3f}m)", 1)
+                stacked_count += 1
+            else:
+                log(f"    ✗ verification failed: XY err={xy_err:.3f}m, Z err={z_err:.3f}m", 1)
+
         # ── Summary ──────────────────────────────────────────
-        await client.call_tool("move_home")
         log(f"\n{'='*55}")
-        log(f"  DONE — {stack} cube(s) stacked at ({DEST_X}, {DEST_Y})")
+        log(f"  DONE — {stacked_count}/{len(cubes)} cube(s) verified stacked at ({DEST_X}, {DEST_Y})")
         log(f"{'='*55}\n")
         for name, status in results:
             icon = "✓" if status == "stacked" else "✗"
             log(f"  {icon} {name:15s} → {status}")
+
+        # ── Finish ───────────────────────────────────────────
+        log("\n[3] Resetting scene …")
+        await client.call_tool("reset_scene")
+        log("  ✓ Scene reset.")
 
 
 if __name__ == "__main__":

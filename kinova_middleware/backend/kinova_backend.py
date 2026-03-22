@@ -141,6 +141,10 @@ class KinovaBackend(ABC):
         """Report whether current target is reached without advancing the physics simulation."""
 
     @abstractmethod
+    def reset_scene(self) -> None:
+        """Reset the simulation scene (e.g. reload physics, restore home)."""
+
+    @abstractmethod
     def get_joint_angles_rad(self) -> list[float]:
         """Read current joint angles in radians."""
 
@@ -236,6 +240,9 @@ class SafetyWrapperBackend(KinovaBackend):
 
     def move_home(self) -> None:
         self._inner.move_home()
+
+    def reset_scene(self) -> None:
+        self._inner.reset_scene()
 
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
         n_arm = self.arm_dof

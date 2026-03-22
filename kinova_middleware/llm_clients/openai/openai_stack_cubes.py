@@ -59,132 +59,36 @@ When done stacking all cubes, say DONE and stop calling tools.
 """
 
 # ── OpenAI tool definitions (matching MCP server) ────────────────────────────
-
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "move_home",
-            "description": "Move the arm to home position. Blocks until reached.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_end_effector_pose",
-            "description": "Read current EE position and quaternion (non-blocking). Returns {position: {x,y,z}, quaternion: {qx,qy,qz,qw}}.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_gripper",
-            "description": "Set gripper opening. 0.9=open, 0.55-0.60=grasp. Blocks briefly.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "percent": {"type": "number", "description": "Opening ratio 0.0-1.0"},
-                },
-                "required": ["percent"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "move_pose",
-            "description": "Move EE to Cartesian pose via IK. Blocks until reached. Pass target_quat=[0,0,0,0] for position-only IK. Returns {status, pos_err, final_pose}.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "target_pos": {
-                        "type": "array", "items": {"type": "number"},
-                        "description": "[x, y, z] in metres",
-                    },
-                    "target_quat": {
-                        "type": "array", "items": {"type": "number"},
-                        "description": "[qx, qy, qz, qw] unit quaternion. Use [0,0,0,0] for position-only.",
-                    },
-                    "allow_orientation_fallback": {
-                        "type": "boolean",
-                        "description": "Fall back to position-only if quat invalid (default true).",
-                    },
-                },
-                "required": ["target_pos", "target_quat"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "rotate_wrist",
-            "description": "Rotate the wrist by a relative angle. Blocks until done.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "angle_deg": {"type": "number", "description": "Rotation in degrees"},
-                },
-                "required": ["angle_deg"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_object_pose",
-            "description": "Read pose of a body/site. Use body_name='all' to discover all free objects. Returns {position, quaternion, size, geom_type}.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "body_name": {"type": "string", "description": "Body name or 'all'"},
-                },
-                "required": ["body_name"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "compute_wrist_alignment",
-            "description": "Compute wrist rotation to align EE fingers with object axis. Returns {angle_deg}.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "obj_quat_xyzw": {
-                        "type": "array", "items": {"type": "number"},
-                        "description": "Object quaternion [qx,qy,qz,qw]",
-                    },
-                    "ee_quat_xyzw": {
-                        "type": "array", "items": {"type": "number"},
-                        "description": "EE quaternion [qx,qy,qz,qw]",
-                    },
-                },
-                "required": ["obj_quat_xyzw", "ee_quat_xyzw"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "compute_grasp_height",
-            "description": "Compute top surface height above body origin. Returns {top_height}.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "geom_type": {"type": "string", "description": "cylinder, box, or sphere"},
-                    "size": {"type": "array", "items": {"type": "number"}},
-                    "quat_xyzw": {"type": "array", "items": {"type": "number"}},
-                },
-                "required": ["geom_type", "size", "quat_xyzw"],
-            },
-        },
-    },
-]
+TOOLS = []
 
 
 # ── Agent loop ───────────────────────────────────────────────────────────────
+
+async def load_tools_from_mcp(mcp_client):
+    """Fetch tools from MCP server and convert to OpenAI format."""
+    print("Fetching tools from MCP server...")
+    try:
+        # FastMCP client's list_tools returns a list of Tool objects
+        mcp_tools = await mcp_client.list_tools()
+        openai_tools = []
+        
+        for tool in mcp_tools:
+            # MCP Tool schema -> OpenAI Function schema
+            function_def = {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": tool.inputSchema or {}
+            }
+            openai_tools.append({
+                "type": "function",
+                "function": function_def
+            })
+            print(f" - Loaded tool: {tool.name}")
+            
+        return openai_tools
+    except Exception as e:
+        print(f"Failed to load tools: {e}")
+        return []
 
 async def run_agent():
     api_key = os.getenv("OPENAI_API_KEY")
@@ -204,10 +108,18 @@ async def run_agent():
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.append({
         "role": "user",
-        "content": "Discover all cubes in the scene and stack them into a tower. Start by homing the arm.",
+        "content": "Discover all cubes in the scene and stack them into a tower.",
     })
 
+
     async with Client(MCP_URL) as mcp:
+        # Load tools dynamically
+        global TOOLS
+        TOOLS = await load_tools_from_mcp(mcp)
+        
+        if not TOOLS:
+            print("Warning: No tools loaded from MCP server. Agent may fail.")
+        
         for turn in range(MAX_TURNS):
             # ── Call OpenAI ──────────────────────────────────
             resp = openai.chat.completions.create(

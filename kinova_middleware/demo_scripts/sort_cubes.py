@@ -21,14 +21,13 @@ from fastmcp import Client
 SERVER_URL = "http://127.0.0.1:8000/mcp"
 
 # Clearances (metres)
-PREGRASP_Z   = 0.10
-GRASP_OFFSET = 0.01
-LIFT_Z       = 0.22
+PREGRASP_Z   = 0.08
+GRASP_OFFSET = 0.022
+LIFT_Z       = 0.20
 
-# Downward-pointing quaternion (rotates World X to World -Z)
-DOWN_QUAT  = [0.0, 0.70710678, 0.0, 0.70710678]
+POS_QUAT = [0.0, 0.0, 0.0, 0.0]
 
-GRIP_OPEN  = 1.0
+GRIP_OPEN  = 0.9
 GRIP_CLOSE = 0.55
 
 
@@ -73,7 +72,7 @@ async def main():
             [c for c in cubes if "blue" in c["body_name"].lower()],
             key=lambda c: math.hypot(c["position"]["x"], c["position"]["y"]),
         )
-        queue = red_cubes + blue_cubes
+        queue = blue_cubes + red_cubes
 
         log(f"Found {len(red_cubes)} red, {len(blue_cubes)} blue cube(s).\n")
         for c in queue:
@@ -111,11 +110,10 @@ async def main():
             # 1. Open gripper
             await client.call_tool("set_gripper", {"percent": GRIP_OPEN})
 
-            # 2. Pregrasp (points DOWN via 5-DOF IK constraint)
+            # 2. Pregrasp (position-only)
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [x, y, z_top + PREGRASP_Z],
-                "target_quat": DOWN_QUAT,
-                "move_wrist": False,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Pregrasp  err={r.get('pos_err', 0):.4f}m", 1)
 
@@ -132,18 +130,17 @@ async def main():
                 log(f"  Wrist align {angle:.1f}°", 1)
                 await client.call_tool("rotate_wrist", {"angle_deg": angle})
             
-            # 3. Descend
+            # 4. Descend
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [x, y, z_top + GRASP_OFFSET],
-                "target_quat": DOWN_QUAT,
-                "move_wrist": False,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Descend   err={r.get('pos_err', 0):.4f}m", 1)
 
             # 5. Grasp
             log(f"  Grasping …", 1)
             await client.call_tool("set_gripper", {"percent": GRIP_CLOSE})
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(5.0)
 
             # 6. Record grasp orientation
             ee2 = p(await client.call_tool("get_end_effector_pose"))
@@ -154,7 +151,7 @@ async def main():
             # 7. Lift (maintain orientation)
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [x, y, z_top + LIFT_Z],
-                "target_quat": grasp_quat,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Lift      err={r.get('pos_err', 0):.4f}m", 1)
 
@@ -182,10 +179,10 @@ async def main():
             bp = bin_data["position"]
             bx, by, bz = bp["x"], bp["y"], bp["z"]
 
-            # 10. Move over bin (maintain orientation)
+            # 10. Move over bin (position-only)
             r = p(await client.call_tool("move_pose", {
                 "target_pos": [bx, by, bz],
-                "target_quat": grasp_quat,
+                "target_quat": POS_QUAT,
             }))
             log(f"  Over bin  err={r.get('pos_err', 0):.4f}m", 1)
 
@@ -200,14 +197,49 @@ async def main():
             # Home between cubes
             await client.call_tool("move_home")
 
+        # ── Verification ─────────────────────────────────────
+        log("\n[2] Verifying sorted cubes …")
+        await asyncio.sleep(1.0) # Let physics settle
+        
+        BIN_CENTERS = {
+            "red_bin_target": (0.0, 0.35),
+            "blue_bin_target": (0.0, -0.35)
+        }
+        BIN_TOLERANCE = 0.08  # Walls are ~0.09m from center, cube radius is 0.0125m
+
+        verified_results = []
+        for name, status in results:
+            if status == "sorted":
+                final = p(await client.call_tool("get_object_pose", {"body_name": name}))
+                if final.get("status") == "error":
+                    verified_results.append((name, "missing_at_verification"))
+                    continue
+                
+                pos = final["position"]
+                x, y = pos["x"], pos["y"]
+                dest = "red_bin_target" if "red" in name.lower() else "blue_bin_target"
+                bx, by = BIN_CENTERS[dest]
+                
+                # Check if center of cube is strictly within the walls' XY bounds
+                if abs(x - bx) <= BIN_TOLERANCE and abs(y - by) <= BIN_TOLERANCE:
+                     log(f"  ✓ {name:15s} verified inside {dest}", 1)
+                     verified_results.append((name, "sorted_verified"))
+                else:
+                     log(f"  ✗ {name:15s} fell out! (x={x:.3f}, y={y:.3f})", 1)
+                     verified_results.append((name, "missed_bin"))
+            else:
+                verified_results.append((name, status))
+        
+        results = verified_results
+
         # ── Summary ──────────────────────────────────────────
         await client.call_tool("move_home")
-        n_sorted = sum(1 for _, s in results if s == "sorted")
+        n_sorted = sum(1 for _, s in results if s == "sorted_verified")
         log(f"\n{'='*55}")
-        log(f"  DONE — {n_sorted}/{len(queue)} cube(s) sorted")
+        log(f"  DONE — {n_sorted}/{len(queue)} cube(s) verified in bins")
         log(f"{'='*55}\n")
         for name, status in results:
-            icon = "✓" if status == "sorted" else "✗"
+            icon = "✓" if status == "sorted_verified" else "✗"
             log(f"  {icon} {name:15s} → {status}")
 
 

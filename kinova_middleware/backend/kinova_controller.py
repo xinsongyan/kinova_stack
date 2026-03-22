@@ -38,6 +38,10 @@ class KinovaController:
     def move_home(self) -> None:
         self._backend.move_home()
 
+    def reset_scene(self) -> None:
+        """Reset the simulation scene."""
+        self._backend.reset_scene()
+
     def send_joint_position_rad(self, q_des: Sequence[float]) -> None:
         self._backend.send_joint_position_rad(q_des)
 
