@@ -6,30 +6,30 @@
 
   <worldbody>
     <!-- Red cube – front right -->
-    <body name="cube_1" pos="0.2 -0.2 0.03" quat="1 0 0 0">
-      <freejoint name="cube_1_joint"/>
+    <body name="red_cube" pos="0.2 -0.2 0.03" quat="1 0 0 0">
+      <freejoint name="red_cube_joint"/>
       <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
-      <geom name="cube_1_geom"
+      <geom name="red_cube_geom"
             type="box" size="0.03 0.03 0.03"
             material="red_cube"
             contype="1" conaffinity="1" friction="1.5 0.01 0.001" solref="0.01 1" margin="0.002" condim="3"/>
     </body>
 
     <!-- Blue cube – front left -->
-    <body name="cube_2" pos="-0.2 -0.2 0.03" quat="1 0 0 0">
-      <freejoint name="cube_2_joint"/>
+    <body name="blue_cube" pos="-0.2 -0.2 0.03" quat="1 0 0 0">
+      <freejoint name="blue_cube_joint"/>
       <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
-      <geom name="cube_2_geom"
+      <geom name="blue_cube_geom"
             type="box" size="0.03 0.03 0.03"
             material="blue_box"
             contype="1" conaffinity="1" friction="1.5 0.01 0.001" solref="0.01 1" margin="0.002" condim="3"/>
     </body>
 
     <!-- Green cube – back centre -->
-    <body name="cube_3" pos="0.0 -0.22 0.03" quat="1 0 0 0">
-      <freejoint name="cube_3_joint"/>
+    <body name="green_cube" pos="0.0 -0.22 0.03" quat="1 0 0 0">
+      <freejoint name="green_cube_joint"/>
       <inertial pos="0 0 0" mass="0.05" diaginertia="0.00001 0.00001 0.00001"/>
-      <geom name="cube_3_geom"
+      <geom name="green_cube_geom"
             type="box" size="0.03 0.03 0.03"
             material="green_sphere"
             contype="1" conaffinity="1" friction="1.5 0.01 0.001" solref="0.01 1" margin="0.002" condim="3"/>

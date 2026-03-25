@@ -32,27 +32,27 @@ def setup_tools(mcp: FastMCP, state: dict):
         return 2.0 * math.acos(dot)
 
     # ── Tool 0: reset_scene ──────────────────────────────────────────────────
-    @mcp.tool()
-    def reset_scene() -> dict:
-        """Reset the simulation physics, returning the environment to its initial state.
+    # @mcp.tool()
+    # def reset_scene() -> dict:
+    #     """Reset the simulation physics, returning the environment to its initial state.
         
-        Returns:
-            status: "ok" or "error"
-            message: human-readable result
-        """
-        log.info("Tool  reset_scene()")
-        ctrl = get_controller()
+    #     Returns:
+    #         status: "ok" or "error"
+    #         message: human-readable result
+    #     """
+    #     log.info("Tool  reset_scene()")
+    #     ctrl = get_controller()
         
-        with motion_lock:
-            with physics_lock:
-                try:
-                    ctrl.reset_scene()
-                except Exception as e:
-                    log.error("reset_scene failed: %s", e)
-                    return {"status": "error", "message": f"Reset failed: {e}"}
+    #     with motion_lock:
+    #         with physics_lock:
+    #             try:
+    #                 ctrl.reset_scene()
+    #             except Exception as e:
+    #                 log.error("reset_scene failed: %s", e)
+    #                 return {"status": "error", "message": f"Reset failed: {e}"}
                     
-        log.info("  → Scene reset successfully.")
-        return {"status": "ok", "message": "Scene reset successfully."}
+    #     log.info("  → Scene reset successfully.")
+    #     return {"status": "ok", "message": "Scene reset successfully."}
 
     # ── Tool 1: move_home ──────────────────────────────────────────────────────
     @mcp.tool()
@@ -274,6 +274,7 @@ def setup_tools(mcp: FastMCP, state: dict):
         """Read the Cartesian pose of any named body in the MuJoCo scene.
 
         Useful for locating objects like the cube, table, or any other body.
+        If you use body_name = "all", it will return the pose of all bodies.
 
         Args:
             body_name: name of the body in the MJCF model (e.g. "cube")

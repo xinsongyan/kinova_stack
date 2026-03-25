@@ -8,30 +8,36 @@ def setup_prompts(mcp: FastMCP):
         """High-level standard operating procedure for picking up a named block."""
         return f"""Task: Pick up '{object_name}'
 
-Follow this step-by-step Standard Operating Procedure (SOP).
-Enforce closed-loop behavior: Observe -> Act -> Verify.
-CRITICAL: Execute ONE tool at a time and observe its result before proceeding.
+You are a robotic arm control agent. You control a 4-DOF Kinova Gen3 arm with a 2-finger gripper.
 
-Phase 1: Observe and Locate
-- Use `get_object_pose` to find the exact coordinates of '{object_name}'.
-- Verify the object is detected and within the reachable workspace.
+STANDARD OPERATING PROCEDURE FOR ANY OBJECT:
+1. **Home & Prepare**: Call `move_home()`. Call `set_gripper(percent=1.0)` to open fingers.
+2. **Locate Object**: Call `get_object_pose(body_name='<target>')`. Read its position, size, geom_type, and quaternion.
+   - For box, geom_type="box". 
+   - For sphere, geom_type="sphere". 
+   - For red_cylinder, geom_type="cylinder".
+3. **Compute Top Height**: Call `compute_grasp_height` using the object's geom_type, size, and quaternion to find `top_height`, the physical top boundary.
+4. **Approach**: Call `move_pose` to the object's x,y, and Z = top_height + 0.15. Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
+5. **Align Wrist**:
+     a. Call `get_end_effector_pose()` to get the current arm orientation (EE quat).
+     b. Call `compute_wrist_alignment` passing the object's quaternion and the EE quaternion.
+     c. If box: the result angle might need modulus math to snap to a 90-degree face. Usually just apply the raw angle unless it's way off. (Hint: angle_deg = ((angle_deg + 45.0) % 90.0) - 45.0)
+     d. Call `rotate_wrist(angle_deg)` with the final alignment angle.
+6. **Descend**: 
+   Call `move_pose` to the object's x,y, and Z = top_height + 0.01.
+   Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
+7. **Grasp**: 
+   Call `set_gripper(percent=...)`:
+   - **sphere**: percent=0.62
+   - **cylinder**: percent=0.55
+   - **box**: percent=0.58
+8. **Lift Safely**: Call `move_pose` using the current x,y, and Z = top_height + 0.20. 
+   CRITICAL: Use `target_quat=[0.0, 0.0, 0.0, 0.0]` and pass the argument `"move_wrist": False` to prevent IK orientation failures while lifting straight up!
 
-Phase 2: Pre-Grasp Approach
-- Use `move_pose` to navigate the end-effector to a safe standoff distance right above '{object_name}'.
-- Verify the arm has reached the pre-grasp pose securely.
-
-Phase 3: Grasp Execution
-- Use `move_pose` to carefully descend to the object's grasping height.
-- Use `set_gripper` to close the gripper fingers around the object.
-- CRITICAL: Execute `set_gripper` exactly once. Do not repeat gripper commands.
-
-Phase 4: Lift and Verify
-- Use `move_pose` to lift the object straight upward.
-- Use `get_joint_state` and `get_end_effector_pose` to verify the arm holds the elevated position.
-
-Stopping Conditions & Failure Handling:
-- If `get_object_pose` fails to locate the object, abort the sequence immediately.
-- If a movement command fails, do not forcefully retry the same path blindly. Stop and report the failure.
+Output policy:
+- Prefer tool calls over chat.
+- Execute steps sequentially and rely on tool outputs rather than guessing values.
+- there is a z limit at 0.07 do not set the arm to go lower than this
 """
 
 

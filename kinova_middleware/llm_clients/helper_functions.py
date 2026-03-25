@@ -11,6 +11,8 @@ async def load_tools_and_prompts_from_mcp(mcp_client):
         mcp_tools = await mcp_client.list_tools()
         openai_tools = []
         for tool in mcp_tools:
+            if tool.name == "reset_scene":
+                continue
             function_def = {
                 "name": tool.name,
                 "description": tool.description or "",

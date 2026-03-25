@@ -512,23 +512,7 @@ class KinovaMuJoCoBackend(KinovaBackend):
         self._governor = ReferenceGovernor(torque_limit=j1_limit)
         self._j1_torque_limit = j1_limit
 
-        # ── CSV logging (at control rate) ────────────────────────────
-        self._j1_log_file = open("j1_tracking_log.csv", "w")
-        self._j1_log_file.write(
-            "time,"
-            "q_des_j1,q_j1,err_j1,"
-            "qd_des_j1,qd_j1,"
-            "qdd_des_j1,qdd_cmd_j1,"
-            "tau_raw_j1,tau_sat_j1,"
-            "util_raw_j1,util_ema_j1,"
-            "gov_scale_cur,gov_scale_next,"
-            "braking_j1\n"
-        )
-
     def close(self) -> None:
-        if hasattr(self, "_j1_log_file") and self._j1_log_file:
-            self._j1_log_file.close()
-            self._j1_log_file = None
         if self._env is None:
             return
         self._env.close()
@@ -602,13 +586,6 @@ class KinovaMuJoCoBackend(KinovaBackend):
         j1_raw_delta = j1_cmd - j1_curr
         j1_wrapped_delta = wrap_to_pi(j1_raw_delta)
 
-        print(f"J1 current: {j1_curr:.6f}")
-        print(f"J1 command: {j1_cmd:.6f}")
-        print(f"J1 raw delta: {j1_raw_delta:.6f}")
-        print(f"J1 wrapped delta: {j1_wrapped_delta:.6f}")
-        print(f"J1 raw delta deg: {np.degrees(j1_raw_delta):.2f}")
-        print(f"J1 wrapped delta deg: {np.degrees(j1_wrapped_delta):.2f}")
-        
         if is_arm_only:
             # Update only arm joints in the full target array
             for i_local, idx_in_full in enumerate(self._arm_indices):
@@ -720,19 +697,6 @@ class KinovaMuJoCoBackend(KinovaBackend):
         # ══ h) Substeps (N × mj_step + 1 viewer sync) ──────────────
         data.ctrl[:] = ctrl
         env.step_n(self._n_substeps)
-
-        # ══ i) Log at control rate ─────────────────────────────────
-        if hasattr(self, "_j1_log_file") and self._j1_log_file:
-            self._j1_log_file.write(
-                f"{data.time:.6f},"
-                f"{q_des[0]:.6f},{q_arm[0]:.6f},{q_des[0]-q_arm[0]:.6f},"
-                f"{qd_des[0]:.6f},{qd_arm[0]:.6f},"
-                f"{qdd_des[0]:.6f},{qdd_cmd[0]:.6f},"
-                f"{tau_raw_j1:.6f},{tau_sat_j1:.6f},"
-                f"{gov.util_raw:.4f},{gov.util_ema:.4f},"
-                f"{gov_cur:.4f},{gov_next:.4f},"
-                f"{int(traj.braking[0])}\n"
-            )
 
         return self.is_desired_position_reached(pos_tol_rad=pos_tol_rad, vel_tol_rad_s=vel_tol_rad_s)
 
