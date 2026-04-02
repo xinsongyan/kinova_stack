@@ -17,18 +17,26 @@ Usage:
 import asyncio
 import os
 import sys
-import json
 import argparse
 from fastmcp import Client
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
-from pydantic import ValidationError
+from helper_functions import (
+    FINISH_TASK_TOOL,
+    VERIFY_OBJECT_LIFT_TOOL,
+    build_retry_tool_message,
+    execute_mcp_tool,
+    finish_task,
+    load_tools_and_prompts_from_mcp,
+    parse_raw_tool_calls,
+    verify_object_lift,
+)
 
 # =========================================================================
 # CONFIGURATION
 # -> Modify these variables to easily switch between models and APIs!
 # =========================================================================
-MODEL_NAME = "deepseek-ai/deepseek-v3.2"
+MODEL_NAME = "deepseek-ai/deepseek-v3.1"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
@@ -59,45 +67,17 @@ STANDARD OPERATING PROCEDURE FOR EACH OBJECT:
    - **box**: percent=0.58
 8. **Lift Safely**: Call `move_pose` using the current x,y, and Z = top_height + 0.20. 
    CRITICAL: Use `target_quat=[0.0, 0.0, 0.0, 0.0]` and pass the argument `"move_wrist": False` to prevent IK orientation failures while lifting straight up!
-9. **Verify Lift**: After you call `move_pose` to lift the object safely, the corresponding tool output will automatically include a `"SYSTEM_ALERT"` letting you know if the object was successfully detected as lifted.
-   Once you receive the success alert inside the tool outputs, drop the object safely and proceed.
+9. **Verify Lift**: After lifting, call the local tool `verify_object_lift(body_name='<target>')` to confirm the object's Z height is high enough.
+   Use that verification result to decide whether the grasp succeeded before moving on.
 
 Once you receive confirmation for all three objects (box, sphere, red_cylinder), state "All tasks complete."
 
 Output policy:
 - Prefer tool calls over chat.
 - Execute steps sequentially and rely on tool outputs rather than guessing values.
+- When all tasks are complete, call `finish_task(summary=...)`.
 - there is a z limit at 0.07 do not set the arm to go lower than this
 """
-
-async def execute_mcp_tool(mcp_client, tool_name: str, args: dict) -> str:
-    """Executes an MCP tool dynamically by name and returns a stringified JSON representation."""
-    print(f"\n🚀 Agent Executing: {tool_name}({args})")
-    
-    # If the agent is trying to query a prompt (because we wrapped them as tools)
-    if tool_name.startswith("get_prompt_"):
-        prompt_name = tool_name.replace("get_prompt_", "", 1)
-        try:
-            result = await mcp_client.get_prompt(prompt_name, args)
-            text = result.messages[0].content.text if hasattr(result.messages[0].content, "text") else str(result.messages[0].content)
-            print(f"   → Read SOP Prompt: {prompt_name}")
-            return text
-        except Exception as e:
-            return json.dumps({"error": f"Failed to get prompt: {str(e)}"})
-
-    # Otherwise, it is a standard MCP tool call
-    try:
-        result = await mcp_client.call_tool(tool_name, args)
-        result_json = json.dumps(result.structured_content or {}, default=str)
-        # Prevent context explosion on giant return values
-        if len(result_json) > 3000:
-            result_json = result_json[:3000] + "... [truncated]"
-        print(f"   → Success: {result_json[:200]}...")
-        return result_json
-    except Exception as e:
-        error_msg = json.dumps({"status": "error", "message": str(e)})
-        print(f"   → ❌ Failed: {error_msg}")
-        return error_msg
 
 async def main():
     api_key = os.environ.get("NVIDIA_API_KEY")
@@ -114,48 +94,12 @@ async def main():
     try:
         async with Client("http://127.0.0.1:8000/mcp") as mcp_client:
             print("Connected! Fetching server capabilities...")
-            
-            # 1. Dynamically load native tools
-            mcp_tools = await mcp_client.list_tools()
-            tools_schema = []
-            for tool in mcp_tools:
-                tools_schema.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.inputSchema or {}
-                    }
-                })
-            
-            # 2. Dynamically load server Prompts, wrap them as tools!
-            mcp_prompts = await mcp_client.list_prompts()
-            for prompt in mcp_prompts:
-                properties = {}
-                required = []
-                if prompt.arguments:
-                    for arg in prompt.arguments:
-                        properties[arg.name] = {
-                            "type": "string",
-                            "description": arg.description or f"The {arg.name} to insert into the prompt"
-                        }
-                        if arg.required:
-                            required.append(arg.name)
-
-                tools_schema.append({
-                    "type": "function",
-                    "function": {
-                        "name": f"get_prompt_{prompt.name}",
-                        "description": prompt.description or f"Query the SOP/instructions for {prompt.name}",
-                        "parameters": {
-                            "type": "object",
-                            "properties": properties,
-                            "required": required
-                        }
-                    }
-                })
+            tools_schema = await load_tools_and_prompts_from_mcp(
+                mcp_client,
+                extra_tools=[VERIFY_OBJECT_LIFT_TOOL, FINISH_TASK_TOOL],
+            )
                 
-            print(f"Successfully loaded {len(mcp_tools)} tools and {len(mcp_prompts)} dynamic prompts!")
+            print(f"Successfully loaded {len(tools_schema)} callable tools (including local tools)!")
             
             # 3. Bind the extracted tools to our Langchain Agent
             llm_with_tools = llm.bind_tools([t["function"] for t in tools_schema])
@@ -175,13 +119,42 @@ async def main():
                 ai_msg = llm_with_tools.invoke(messages)
                 messages.append(ai_msg)
                 
+                tool_calls = list(ai_msg.tool_calls or [])
+                if not tool_calls and ai_msg.content:
+                    fallback_calls, fallback_tool_messages = parse_raw_tool_calls(ai_msg.content, iteration)
+                    tool_calls.extend(fallback_calls)
+                    messages.extend(fallback_tool_messages)
+                    if fallback_tool_messages and not tool_calls:
+                        tool_calls = [{"dummy": True}]
+
                 # Check if it wants to use tools
-                if ai_msg.tool_calls:
-                    for tool_call in ai_msg.tool_calls:
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        if "dummy" in tool_call:
+                            continue
+                        if tool_call["name"] == "finish_task":
+                            result_str = await finish_task(mcp_client, tool_call["args"].get("summary", "Task finished."))
+                            messages.append(
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    content=result_str
+                                )
+                            )
+                            print(f"\n🤖 Agent Final Report: {tool_call['args'].get('summary', 'Task finished.')}")
+                            return
                         result_str = await execute_mcp_tool(
                             mcp_client, 
                             tool_call["name"], 
-                            tool_call["args"]
+                            tool_call["args"],
+                            local_tool_handlers={
+                                "verify_object_lift": lambda client, tool_args: verify_object_lift(
+                                    client,
+                                    tool_args.get("body_name", ""),
+                                    float(tool_args.get("min_height", 0.12)),
+                                )
+                            },
+                            log_prefix="🚀 Agent Executing",
                         )
                         # Return the result back into the Agent's context
                         messages.append(
@@ -192,9 +165,12 @@ async def main():
                             )
                         )
                 else:
-                    # No tool calls, the AI just gave a conversational response (mission complete or clarifying question)
-                    print(f"\n🤖 Agent Final Report: {ai_msg.content}")
-                    break
+                    messages.append(
+                        build_retry_tool_message(
+                            iteration,
+                            "No valid tool call was produced."
+                        )
+                    )
                     
                 iteration += 1
 

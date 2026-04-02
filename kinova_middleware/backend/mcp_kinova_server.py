@@ -137,7 +137,8 @@ def _run_until_reached(
 
     while time.monotonic() < deadline:
         with _physics_lock:
-            reached = ctrl.is_reached(**kwargs)
+            # Step the simulation and check if reached
+            reached = ctrl.step(**kwargs)
             q_curr = np.array(ctrl.get_joint_angles_rad()[:ctrl.arm_dof])
             # Capture current Cartesian position
             pos_tuple, _ = ctrl.get_end_effector_pose()
@@ -215,22 +216,7 @@ def _quat_rotation_error(
     return 2.0 * math.acos(dot)
 
 
-# ---------------------------------------------------------------------------
-# Background stepper thread
-# ---------------------------------------------------------------------------
-
-def _stepper_loop() -> None:
-    """Run controller.step() at CONTROL_HZ while no motion command owns the lock."""
-    dt = 1.0 / CONTROL_HZ
-    while _stepper_running.is_set():
-        acquired = _physics_lock.acquire(timeout=dt)
-        if acquired:
-            try:
-                if _controller is not None:
-                    _controller.step()
-            finally:
-                _physics_lock.release()
-        time.sleep(dt)
+# Stepper-thread removed: simulation now only advances during tool calls.
 
 
 # ---------------------------------------------------------------------------
@@ -267,20 +253,13 @@ def _startup() -> None:
     log.info("Moving home …")
     _controller.move_home()
     _run_until_reached(timeout_s=10.0, hold_seconds=HOLD_SECONDS)
-    log.info("Home reached.")
-
-    # Start background stepper
-    _stepper_running.set()
-    t = threading.Thread(target=_stepper_loop, daemon=True, name="kinova-stepper")
-    t.start()
-    log.info("Stepper thread started at %.0f Hz", CONTROL_HZ)
+    log.info("Home reached. Simulation frozen.")
 
 
 def _shutdown() -> None:
     global _controller
     log.info("Shutting down …")
     _stepper_running.clear()
-    time.sleep(0.05)  # let stepper finish current tick
     if _controller is not None:
         _controller.close()
         _controller = None

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import math
 from fastmcp import Client
+import time
 
 SERVER_URL = "http://127.0.0.1:8000/mcp"
 
@@ -139,7 +140,7 @@ async def grab_object(client: Client, name: str, drop_x: float, drop_y: float):
         return False
     else:
         log(f"  ✓ Valid grasp on {name} (z {pos['z']:.3f} → {new_z:.3f})", 1)
-    
+    time.sleep(5)
     await client.call_tool("set_gripper", {"percent": GRIP_OPEN})
     log(f"  ✓ Grab and Dropped {name}")
     
@@ -156,7 +157,6 @@ async def main():
 
         log("\n[0] Preparations …")
         await client.call_tool("move_home")
-        await client.call_tool("reset_scene")
         
         # Grab Box (Cube)
         await grab_object(client, "box", drop_x=0.0, drop_y=-0.2)

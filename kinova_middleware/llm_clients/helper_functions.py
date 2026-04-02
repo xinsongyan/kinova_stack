@@ -1,82 +1,310 @@
 import json
+import re
 
-async def load_tools_and_prompts_from_mcp(mcp_client):
+from langchain_core.messages import ToolMessage
+
+
+CHECK_SORTING_STATUS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "check_sorting_status",
+        "description": "Analyze the scene to see which cubes are sorted, which are at start, and which are out of workspace.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+CHECK_STACKING_STATUS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "check_stacking_status",
+        "description": "Analyze the cubes and report which cube is stacked on top of which other cube based on z height and xy alignment.",
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+VERIFY_OBJECT_LIFT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "verify_object_lift",
+        "description": "Check whether a named object has been lifted high enough after a grasp.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "body_name": {
+                    "type": "string",
+                    "description": "The object name to verify, for example box, sphere, or red_cylinder.",
+                },
+                "min_height": {
+                    "type": "number",
+                    "description": "Minimum Z height that counts as a successful lift. Default is 0.12.",
+                },
+            },
+            "required": ["body_name"],
+        },
+    },
+}
+
+FINISH_TASK_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "finish_task",
+        "description": "Call this when the task is truly complete or cannot continue safely. This is the only normal way to end the agent loop.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Short final summary of what was completed or why the task stopped.",
+                }
+            },
+            "required": ["summary"],
+        },
+    },
+}
+
+
+async def load_tools_and_prompts_from_mcp(mcp_client, extra_tools=None, skip_reset_scene=False):
     """
-    Loads tools from the MCP server.
-    Also fetches available prompts and wraps them as callable OpenAI tools,
-    allowing the LLM to query Standard Operating Procedures (SOPs) on demand.
+    Load MCP tools and prompts, and optionally append local client-only tools.
     """
     print("Fetching tools from MCP server...")
     try:
         mcp_tools = await mcp_client.list_tools()
         openai_tools = []
         for tool in mcp_tools:
-            if tool.name == "reset_scene":
+            if skip_reset_scene and tool.name == "reset_scene":
                 continue
-            function_def = {
-                "name": tool.name,
-                "description": tool.description or "",
-                "parameters": tool.inputSchema or {}
-            }
-            openai_tools.append({
-                "type": "function",
-                "function": function_def
-            })
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "parameters": tool.inputSchema or {},
+                    },
+                }
+            )
             print(f" - Loaded tool: {tool.name}")
-            
+
         print("Fetching prompts from MCP server...")
         mcp_prompts = await mcp_client.list_prompts()
-        
         for prompt in mcp_prompts:
             print(f" - Loaded prompt template as tool: get_prompt_{prompt.name}")
-            
-            # Create a tool definition that lets the AI fetch this prompt
             properties = {}
             required = []
             if prompt.arguments:
                 for arg in prompt.arguments:
                     properties[arg.name] = {
                         "type": "string",
-                        "description": arg.description or f"The {arg.name} to insert into the prompt"
+                        "description": arg.description or f"The {arg.name} to insert into the prompt",
                     }
                     if arg.required:
                         required.append(arg.name)
 
-            prompt_tool_def = {
-                "name": f"get_prompt_{prompt.name}",
-                "description": prompt.description or f"Get the Standard Operating Procedure (SOP) for {prompt.name}",
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": f"get_prompt_{prompt.name}",
+                        "description": prompt.description or f"Get the Standard Operating Procedure (SOP) for {prompt.name}",
+                        "parameters": {
+                            "type": "object",
+                            "properties": properties,
+                            "required": required,
+                        },
+                    },
                 }
-            }
-            openai_tools.append({
-                "type": "function",
-                "function": prompt_tool_def
-            })
+            )
+
+        if extra_tools:
+            openai_tools.extend(extra_tools)
 
         return openai_tools
     except Exception as e:
         print(f"Failed to load tools and prompts: {e}")
         return []
 
+
 async def handle_prompt_tool_call(mcp_client, func_name, args):
     """
-    If the AI calls a tool starting with 'get_prompt_', we route it to get_prompt.
+    Route `get_prompt_*` tool calls to MCP `get_prompt`.
     """
     prompt_name = func_name.replace("get_prompt_", "", 1)
     try:
         result = await mcp_client.get_prompt(prompt_name, args)
         if result and hasattr(result, "messages") and result.messages:
             content = result.messages[0].content
-            return {"status": "ok", "prompt_text": content.text if hasattr(content, "text") else str(content)}
-        return {"status": "error", "message": "Prompt returned empty messages."}
+            text = content.text if hasattr(content, "text") else str(content)
+            print(f"   → Read SOP Prompt: {prompt_name}")
+            return text
+        return json.dumps({"status": "error", "message": "Prompt returned empty messages."})
     except Exception as e:
-        return {"status": "error", "message": f"Failed to get prompt: {e}"}
+        return json.dumps({"status": "error", "message": f"Failed to get prompt: {e}"})
+
+
+async def check_sorting_progress(mcp_client) -> str:
+    """Analyze the current scene and report sorting progress to the LLM."""
+    bin_centers = {
+        "red_bin_target": (0.0, 0.35),
+        "blue_bin_target": (0.0, -0.35),
+    }
+    bin_tolerance = 0.10
+    workspace = {
+        "red": {"x": (0.18, 0.30), "y": (-0.25, 0.25)},
+        "blue": {"x": (-0.30, -0.18), "y": (-0.25, 0.25)},
+    }
+
+    try:
+        res = await mcp_client.call_tool("get_object_pose", {"body_name": "all"})
+        data = res.structured_content or {}
+        objects = data.get("objects", [])
+
+        report = []
+        actionable = []
+
+        for obj in objects:
+            name = obj["body_name"]
+            if "cube" not in name.lower():
+                continue
+
+            pos = obj["position"]
+            x, y = pos["x"], pos["y"]
+            color = "red" if "red" in name.lower() else "blue"
+            bin_name = f"{color}_bin_target"
+            bx, by = bin_centers[bin_name]
+
+            if abs(x - bx) < bin_tolerance and abs(y - by) < bin_tolerance:
+                report.append(f"- {name}: Correctly Sorted (In {bin_name})")
+                continue
+
+            bounds = workspace[color]
+            if bounds["x"][0] <= x <= bounds["x"][1] and bounds["y"][0] <= y <= bounds["y"][1]:
+                report.append(f"- {name}: At Starting Position (In {color}_zone - Ready to pick)")
+                actionable.append(name)
+                continue
+
+            report.append(f"- {name}: OUT OF WORKSPACE / MISPLACED (x={x:.3f}, y={y:.3f})")
+
+        summary = "CURRENT SORTING STATUS REPORT:\n" + ("\n".join(report) if report else "No cubes detected.")
+        if not actionable and any("Sorted" not in line for line in report):
+            summary += "\n\nWARNING: No actionable cubes found in their workspaces. Remaining cubes are misplaced."
+        elif not actionable:
+            summary += "\n\nMISSION STATUS: ALL CUBES SORTED SUCCESSFULLY."
+        else:
+            summary += f"\n\nNEXT ACTION: Begin sorting {len(actionable)} remaining cubes starting with '{actionable[0]}'."
+
+        summary += "\n\nCRITICAL SAFETY RULE: Never attempt to pick a cube marked 'OUT OF WORKSPACE'. Focus only on cubes in their designated start zones."
+        print(f"\n[check_sorting_status summary]:\n{summary}\n")
+        return summary
+    except Exception as e:
+        return f"Error checking progress: {str(e)}"
+
+
+async def check_stacking_status(mcp_client) -> str:
+    """Analyze cube positions and report whether any cube is stacked on another cube."""
+    xy_tolerance = 0.05
+    min_vertical_gap = 0.045
+
+    try:
+        res = await mcp_client.call_tool("get_object_pose", {"body_name": "all"})
+        data = res.structured_content or {}
+        objects = data.get("objects", [])
+        cubes = [obj for obj in objects if "cube" in obj.get("body_name", "").lower()]
+
+        if not cubes:
+            return "CURRENT STACKING STATUS REPORT:\nNo cubes detected."
+
+        report = ["CURRENT STACKING STATUS REPORT:"]
+        for cube in sorted(cubes, key=lambda item: item["position"]["z"]):
+            pos = cube["position"]
+            report.append(f"- {cube['body_name']}: x={pos['x']:.3f}, y={pos['y']:.3f}, z={pos['z']:.3f}")
+
+        relations = []
+        for top_cube in cubes:
+            top_pos = top_cube["position"]
+            top_hh = top_cube.get("size", [0.03, 0.03, 0.03])[2] if len(top_cube.get("size", [])) >= 3 else 0.03
+            best_candidate = None
+
+            for bottom_cube in cubes:
+                if bottom_cube["body_name"] == top_cube["body_name"]:
+                    continue
+
+                bottom_pos = bottom_cube["position"]
+                bottom_hh = bottom_cube.get("size", [0.03, 0.03, 0.03])[2] if len(bottom_cube.get("size", [])) >= 3 else 0.03
+                dx = abs(top_pos["x"] - bottom_pos["x"])
+                dy = abs(top_pos["y"] - bottom_pos["y"])
+                dz = top_pos["z"] - bottom_pos["z"]
+                expected_gap = top_hh + bottom_hh
+
+                if dz <= min_vertical_gap or dx > xy_tolerance or dy > xy_tolerance:
+                    continue
+
+                score = abs(dz - expected_gap) + dx + dy
+                if best_candidate is None or score < best_candidate["score"]:
+                    best_candidate = {
+                        "top": top_cube["body_name"],
+                        "bottom": bottom_cube["body_name"],
+                        "dx": dx,
+                        "dy": dy,
+                        "dz": dz,
+                        "score": score,
+                    }
+
+            if best_candidate is not None:
+                relations.append(best_candidate)
+
+        unique_relations = {}
+        for relation in relations:
+            key = (relation["top"], relation["bottom"])
+            if key not in unique_relations or relation["score"] < unique_relations[key]["score"]:
+                unique_relations[key] = relation
+
+        if unique_relations:
+            report.append("")
+            report.append("DETECTED STACK RELATIONS:")
+            for relation in sorted(unique_relations.values(), key=lambda item: item["dz"], reverse=True):
+                report.append(
+                    f"- {relation['top']} is on top of {relation['bottom']} "
+                    f"(dx={relation['dx']:.3f}, dy={relation['dy']:.3f}, dz={relation['dz']:.3f})"
+                )
+            if ("blue_cube", "red_cube") in unique_relations:
+                report.append("")
+                report.append("MISSION STATUS: blue_cube is stacked on red_cube.")
+        else:
+            report.append("")
+            report.append("MISSION STATUS: No cube-on-cube stack detected yet.")
+
+        summary = "\n".join(report)
+        print(f"\n[check_stacking_status summary]:\n{summary}\n")
+        return summary
+    except Exception as e:
+        return f"Error checking stacking status: {str(e)}"
+
+
+async def verify_object_lift(mcp_client, body_name: str, min_height: float = 0.12) -> str:
+    """Check whether a named object has been lifted high enough above the table."""
+    try:
+        result = await mcp_client.call_tool("get_object_pose", {"body_name": body_name})
+        data = result.structured_content or {}
+        if data.get("status") == "error":
+            return f"LIFT CHECK ERROR: {data.get('message', 'Unknown error')}"
+
+        position = data.get("position", {})
+        z = float(position.get("z", 0.0))
+        lifted = z >= min_height
+
+        summary = (
+            f"LIFT STATUS for '{body_name}': z={z:.3f} m, threshold={min_height:.3f} m. "
+            f"{'PASS: object is lifted high enough.' if lifted else 'FAIL: object is still too low.'}"
+        )
+        print(f"\n[verify_object_lift summary]:\n{summary}\n")
+        return summary
+    except Exception as e:
+        return f"LIFT CHECK ERROR for '{body_name}': {str(e)}"
+
 
 async def verify_lift(mcp_client, body_name):
-    """Checks if the object's Z height is significantly above the board (e.g. > 0.10m)."""
+    """Backward-compatible wrapper returning `(lifted, z)`."""
     try:
         result = await mcp_client.call_tool("get_object_pose", {"body_name": body_name})
         data = result.structured_content or {}
@@ -87,3 +315,120 @@ async def verify_lift(mcp_client, body_name):
     except Exception as e:
         print(f"Verification error: {e}")
         return False, 0.0
+
+
+async def execute_mcp_tool(mcp_client, tool_name: str, args: dict, local_tool_handlers=None, log_prefix="Agent Executing") -> str:
+    """Execute a local helper, prompt tool, or MCP tool and stringify the result."""
+    print(f"\n{log_prefix}: {tool_name}({args})")
+
+    if local_tool_handlers and tool_name in local_tool_handlers:
+        return await local_tool_handlers[tool_name](mcp_client, args)
+
+    if tool_name.startswith("get_prompt_"):
+        return await handle_prompt_tool_call(mcp_client, tool_name, args)
+
+    try:
+        result = await mcp_client.call_tool(tool_name, args)
+        result_json = json.dumps(result.structured_content or {}, default=str)
+        if len(result_json) > 3000:
+            result_json = result_json[:3000] + "... [truncated]"
+        print(f"   → Success: {result_json[:200]}...")
+        return result_json
+    except Exception as e:
+        error_msg = json.dumps({"status": "error", "message": str(e)})
+        print(f"   → ❌ Failed: {error_msg}")
+        return error_msg
+
+
+async def finish_task(_mcp_client, summary: str) -> str:
+    """Return a structured completion marker for the client loop."""
+    result = json.dumps({"status": "finished", "summary": summary})
+    print(f"   → finish_task: {summary}")
+    return result
+
+
+def _repair_tool_args_json(raw_args: str) -> str:
+    """Best-effort cleanup for malformed JSON-ish tool arguments from the model."""
+    repaired = raw_args.replace("｜", "|")
+    repaired = re.sub(r"[\u4e00-\u9fff]", "", repaired)
+    repaired = re.sub(r"(?<=[:\[,])\s*[A-Za-z_\u0080-\uFFFF][A-Za-z0-9_\u0080-\uFFFF]*\s*(?=[,\]\}])", " 0 ", repaired)
+    repaired = re.sub(r",\s*([\]\}])", r"\1", repaired)
+    return repaired.strip()
+
+
+def parse_raw_tool_calls(content: str, iteration: int) -> tuple[list[dict], list[ToolMessage]]:
+    """Fallback parser for models that emit raw tool tags instead of structured calls."""
+    tool_calls = []
+    tool_messages = []
+
+    if not content:
+        return tool_calls, tool_messages
+
+    normalized_content = content.replace("｜", "|")
+    if "<|tool▁call▁begin|>" not in normalized_content:
+        return tool_calls, tool_messages
+
+    print("   [Fallback Parser] Found raw tool call tags. Extracting...")
+    sanitized_content = re.sub(r"[\u4e00-\u9fff]", "", normalized_content)
+    raw_calls = re.findall(
+        r"<\|tool▁call▁begin\|>(.*?)<\|tool▁sep\|>(.*?)<\|tool▁call▁end\|>",
+        sanitized_content,
+        re.DOTALL,
+    )
+
+    if not raw_calls:
+        err_msg = (
+            "TOOL PARSE ERROR: Raw tool-call tags were detected, but no valid tool calls could be extracted. "
+            "Resend the next action as a valid structured tool call with valid JSON arguments only."
+        )
+        print(f"   [Fallback Parser] {err_msg}")
+        tool_messages.append(
+            ToolMessage(
+                tool_call_id=f"err_{iteration}_raw_tool_parse",
+                name="tool_parse_error",
+                content=json.dumps({"status": "error", "message": err_msg}),
+            )
+        )
+        return tool_calls, tool_messages
+
+    for tool_name, tool_args_raw in raw_calls:
+        try:
+            cleaned_args = _repair_tool_args_json(tool_args_raw)
+            tool_calls.append(
+                {
+                    "name": tool_name.strip(),
+                    "args": json.loads(cleaned_args),
+                    "id": f"fallback_{iteration}_{tool_name.strip()}",
+                }
+            )
+        except Exception as e:
+            err_msg = (
+                f"JSON PARSE ERROR: Your tool call for '{tool_name.strip()}' was malformed: {e}. "
+                "Please resend only valid JSON."
+            )
+            print(f"   [Fallback Parser] {err_msg}")
+            tool_messages.append(
+                ToolMessage(
+                    tool_call_id=f"err_{iteration}_{tool_name.strip()}",
+                    name=tool_name.strip(),
+                    content=json.dumps({"status": "error", "message": err_msg}),
+                )
+            )
+
+    return tool_calls, tool_messages
+
+
+def build_retry_tool_message(iteration: int, reason: str) -> ToolMessage:
+    """Create a tool-like error message that nudges the model to retry with valid tools."""
+    return ToolMessage(
+        tool_call_id=f"err_{iteration}_retry",
+        name="agent_retry_required",
+        content=json.dumps(
+            {
+                "status": "error",
+                "message": (
+                    f"{reason} Use a valid tool call next, or call finish_task(summary=...) if the task is complete."
+                ),
+            }
+        ),
+    )

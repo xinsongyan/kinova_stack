@@ -13,6 +13,7 @@
             type="box" size="0.03 0.03 0.03"
             material="red_cube"
             contype="1" conaffinity="1" friction="1.5 0.01 0.001" solref="0.01 1" margin="0.002" condim="3"/>
+      <site name="red_cube_site" pos="0 0 0" size="0.01" rgba="1 0 0 0.4" type="sphere"/>
     </body>
 
     <!-- Blue cube – front left -->
@@ -23,6 +24,7 @@
             type="box" size="0.03 0.03 0.03"
             material="blue_box"
             contype="1" conaffinity="1" friction="1.5 0.01 0.001" solref="0.01 1" margin="0.002" condim="3"/>
+      <site name="blue_cube_site" pos="0 0 0" size="0.01" rgba="0 0 1 0.4" type="sphere"/>
     </body>
 
     <!-- Green cube – back centre -->
@@ -33,6 +35,7 @@
             type="box" size="0.03 0.03 0.03"
             material="green_sphere"
             contype="1" conaffinity="1" friction="1.5 0.01 0.001" solref="0.01 1" margin="0.002" condim="3"/>
+      <site name="green_cube_site" pos="0 0 0" size="0.01" rgba="0 1 0 0.4" type="sphere"/>
     </body>
   </worldbody>
 

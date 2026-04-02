@@ -10,10 +10,19 @@ tools to stack cubes, explicitly powered by the DeepSeek-v3.2 model via NVIDIA.
 import asyncio
 import os
 import sys
-import json
 from fastmcp import Client
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from helper_functions import (
+    CHECK_STACKING_STATUS_TOOL,
+    FINISH_TASK_TOOL,
+    build_retry_tool_message,
+    check_stacking_status,
+    execute_mcp_tool,
+    finish_task,
+    load_tools_and_prompts_from_mcp,
+    parse_raw_tool_calls,
+)
 
 # =========================================================================
 # CONFIGURATION
@@ -75,57 +84,37 @@ Recommended execution sequence:
      c. If box: the result angle might need modulus math to snap to a 90-degree face. Usually just apply the raw angle unless it's way off. (Hint: angle_deg = ((angle_deg + 45.0) % 90.0) - 45.0)
      d. Call `rotate_wrist(angle_deg)` with the final alignment angle.
 8. Descend: 
-   Call `move_pose` to the object's x,y, and Z = top_height + 0.01.
+   Call `move_pose` to the object's x,y, and Z = top_height + 0.02.
    Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
 9. close gripper (0.58 is a good value for cubes)
 10. immediately lift to precomputed lift point
-11. move to precomputed preplace point above red cube
-12. descend to precomputed place point
-13. open gripper
-14. retreat upward to precomputed retreat point
-15. optionally verify final blue cube pose
-16. return home
+11. **Prelocate Stack Target**: Call `get_object_pose(body_name='red_cube')`. Note its position and half-height (size[2]).
+12. **Precalculate Stacking Height**: Determine the center position for the blue cube: `target_z = red_z + red_hh + blue_hh + 0.01` (includes a small safety margin).
+13. **Pre-Place**:
+    a. Call `move_pose` to `[red_x, red_y, target_z + 0.15]` with `target_quat=[0.0, 0.0, 0.0, 0.0]`.
+15. **Place Descend**: 
+    Call `move_pose` to the corrected X,Y and `Z = target_z + 0.1`.
+16. **Release and Retreat**: 
+    a. Call `set_gripper(percent=1.0)`.
+    b. Call `move_pose` straight up to `target_z + 0.15` with `"move_wrist": False`.
+    c. Call `move_home()`.
+17. **Verify Stack**:
+    Call the local tool `check_stacking_status()` to confirm which cube is on top of which.
+    Use that report to verify whether `blue_cube` ended up on `red_cube` or whether a different pair is stacked.
 
 Reasoning rules:
 - Think step by step.
 - Be concise internally.
 - Do not spend time over-planning after the grasp.
 - The key requirement is: precompute lift, preplace, and place coordinates BEFORE picking up the blue cube.
+- never go above 0.24m in the z axis
 
 Output style:
 - Briefly state what you are doing before each major action.
 - Report important pose values and errors when useful.
 - If a step fails, explain why and recover safely.
+- When the task is complete, call `finish_task(summary=...)`.
 """
-
-async def execute_mcp_tool(mcp_client, tool_name: str, args: dict) -> str:
-    """Executes an MCP tool dynamically by name and returns a stringified JSON representation."""
-    print(f"\n🚀 Agent Executing: {tool_name}({args})")
-    
-    # If the agent is trying to query a prompt (because we wrapped them as tools)
-    if tool_name.startswith("get_prompt_"):
-        prompt_name = tool_name.replace("get_prompt_", "", 1)
-        try:
-            result = await mcp_client.get_prompt(prompt_name, args)
-            text = result.messages[0].content.text if hasattr(result.messages[0].content, "text") else str(result.messages[0].content)
-            print(f"   → Read SOP Prompt: {prompt_name}")
-            return text
-        except Exception as e:
-            return json.dumps({"error": f"Failed to get prompt: {str(e)}"})
-
-    # Otherwise, it is a standard MCP tool call
-    try:
-        result = await mcp_client.call_tool(tool_name, args)
-        result_json = json.dumps(result.structured_content or {}, default=str)
-        # Prevent context explosion on giant return values
-        if len(result_json) > 3000:
-            result_json = result_json[:3000] + "... [truncated]"
-        print(f"   → Success: {result_json[:200]}...")
-        return result_json
-    except Exception as e:
-        error_msg = json.dumps({"status": "error", "message": str(e)})
-        print(f"   → ❌ Failed: {error_msg}")
-        return error_msg
 
 async def main():
     api_key = os.environ.get("NVIDIA_API_KEY")
@@ -142,48 +131,12 @@ async def main():
     try:
         async with Client("http://127.0.0.1:8000/mcp") as mcp_client:
             print("Connected! Fetching server capabilities...")
-            
-            # 1. Dynamically load native tools
-            mcp_tools = await mcp_client.list_tools()
-            tools_schema = []
-            for tool in mcp_tools:
-                tools_schema.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description or "",
-                        "parameters": tool.inputSchema or {}
-                    }
-                })
-            
-            # 2. Dynamically load server Prompts, wrap them as tools!
-            mcp_prompts = await mcp_client.list_prompts()
-            for prompt in mcp_prompts:
-                properties = {}
-                required = []
-                if prompt.arguments:
-                    for arg in prompt.arguments:
-                        properties[arg.name] = {
-                            "type": "string",
-                            "description": arg.description or f"The {arg.name} to insert into the prompt"
-                        }
-                        if arg.required:
-                            required.append(arg.name)
-
-                tools_schema.append({
-                    "type": "function",
-                    "function": {
-                        "name": f"get_prompt_{prompt.name}",
-                        "description": prompt.description or f"Query the SOP/instructions for {prompt.name}",
-                        "parameters": {
-                            "type": "object",
-                            "properties": properties,
-                            "required": required
-                        }
-                    }
-                })
+            tools_schema = await load_tools_and_prompts_from_mcp(
+                mcp_client,
+                extra_tools=[CHECK_STACKING_STATUS_TOOL, FINISH_TASK_TOOL],
+            )
                 
-            print(f"Successfully loaded {len(mcp_tools)} tools and {len(mcp_prompts)} dynamic prompts!")
+            print(f"Successfully loaded {len(tools_schema)} callable tools (including local tools)!")
             
             # 3. Bind the extracted tools to our Langchain Agent
             llm_with_tools = llm.bind_tools([t["function"] for t in tools_schema])
@@ -204,13 +157,37 @@ async def main():
                 print(ai_msg.content)
                 messages.append(ai_msg)
                 
+                tool_calls = list(ai_msg.tool_calls or [])
+                if not tool_calls and ai_msg.content:
+                    fallback_calls, fallback_tool_messages = parse_raw_tool_calls(ai_msg.content, iteration)
+                    tool_calls.extend(fallback_calls)
+                    messages.extend(fallback_tool_messages)
+                    if fallback_tool_messages and not tool_calls:
+                        tool_calls = [{"dummy": True}]
+
                 # Check if it wants to use tools
-                if ai_msg.tool_calls:
-                    for tool_call in ai_msg.tool_calls:
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        if "dummy" in tool_call:
+                            continue
+                        if tool_call["name"] == "finish_task":
+                            result_str = await finish_task(mcp_client, tool_call["args"].get("summary", "Task finished."))
+                            messages.append(
+                                ToolMessage(
+                                    tool_call_id=tool_call["id"],
+                                    name=tool_call["name"],
+                                    content=result_str
+                                )
+                            )
+                            print(f"\n🤖 Agent Final Report: {tool_call['args'].get('summary', 'Task finished.')}")
+                            return
                         result_str = await execute_mcp_tool(
                             mcp_client, 
                             tool_call["name"], 
-                            tool_call["args"]
+                            tool_call["args"],
+                            local_tool_handlers={
+                                "check_stacking_status": lambda client, tool_args: check_stacking_status(client)
+                            },
                         )
                         # Return the result back into the Agent's context
                         messages.append(
@@ -221,9 +198,12 @@ async def main():
                             )
                         )
                 else:
-                    # No tool calls, the AI just gave a conversational response (mission complete or clarifying question)
-                    print(f"\n🤖 Agent Final Report: {ai_msg.content}")
-                    break
+                    messages.append(
+                        build_retry_tool_message(
+                            iteration,
+                            "No valid tool call was produced."
+                        )
+                    )
                     
                 iteration += 1
 

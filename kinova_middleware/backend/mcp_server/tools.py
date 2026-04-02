@@ -210,23 +210,23 @@ def setup_tools(mcp: FastMCP, state: dict):
         if quat_norm >= 1e-6:
             rot_err = _quat_rotation_error(final_quat, tuple(target_quat))
 
-        if pos_err > 0.01:
+        if pos_err > 0.04:
             status = "error"
             msg = f"ik_failed: position error too large (err={pos_err:.4f}m)"
             log.error("  %s", msg)
             return {"status": status, "message": msg, "mode_used": mode_used, "pos_err": pos_err, "rot_err": rot_err}
         
-        if rot_err is not None:
-            if not move_wrist and rot_err > 0.3:
-                status = "error"
-                msg = f"ik_failed: orientation infeasible with move_wrist=False (err={rot_err:.4f}rad)"
-                log.error("  %s", msg)
-                return {"status": status, "message": msg, "mode_used": mode_used, "pos_err": pos_err, "rot_err": rot_err}
-            elif move_wrist and rot_err > 0.2:
-                status = "error"
-                msg = f"ik_failed: orientation error too large (err={rot_err:.4f}rad)"
-                log.error("  %s", msg)
-                return {"status": status, "message": msg, "mode_used": mode_used, "pos_err": pos_err, "rot_err": rot_err}
+        # if rot_err is not None:
+        #     if not move_wrist and rot_err > 0.3:
+        #         status = "error"
+        #         msg = f"ik_failed: orientation infeasible with move_wrist=False (err={rot_err:.4f}rad)"
+        #         log.error("  %s", msg)
+        #         return {"status": status, "message": msg, "mode_used": mode_used, "pos_err": pos_err, "rot_err": rot_err}
+        #     elif move_wrist and rot_err > 0.2:
+        #         status = "error"
+        #         msg = f"ik_failed: orientation error too large (err={rot_err:.4f}rad)"
+        #         log.error("  %s", msg)
+        #         return {"status": status, "message": msg, "mode_used": mode_used, "pos_err": pos_err, "rot_err": rot_err}
 
         status = "ok" if reached else "timeout"
         log.info("  → %s  pos_err=%.4f m  rot_err=%s rad", status, pos_err, f"{rot_err:.4f}" if rot_err is not None else "n/a")

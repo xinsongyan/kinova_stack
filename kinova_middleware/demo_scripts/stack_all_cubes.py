@@ -208,9 +208,44 @@ async def main():
             }))
             log(f"  Preplace  err={r.get('pos_err', 0):.4f}m", 1)
 
+            # Establish nominal place coordinates
+            place_x, place_y = DEST_X, DEST_Y
+
+            # 9.5 Alignment Verification & Correction
+            if stack > 0:
+                below_name = cubes[stack-1]["body_name"]
+                log(f"  Aligning {name} with {below_name} below …", 1)
+                
+                # Query positions of held and below cubes
+                below_pose = p(await client.call_tool("get_object_pose", {"body_name": below_name}))
+                held_pose = p(await client.call_tool("get_object_pose", {"body_name": name}))
+                
+                bx, by = below_pose["position"]["x"], below_pose["position"]["y"]
+                hx, hy = held_pose["position"]["x"], held_pose["position"]["y"]
+                
+                dx = bx - hx
+                dy = by - hy
+                dist = math.hypot(dx, dy)
+                
+                if dist > 0.02:
+                    log(f"  ⚠ Misaligned by {dist:.3f}m. Correcting …", 1)
+                    # Correct current EE position by the observed error
+                    ee = p(await client.call_tool("get_end_effector_pose"))["position"]
+                    place_x, place_y = ee["x"] + dx, ee["y"] + dy
+                    
+                    await client.call_tool("move_pose", {
+                        "target_pos": [place_x, place_y, target_z + PREPLACE_Z],
+                        "target_quat": POS_QUAT,
+                    })
+                else:
+                    log(f"  ✓ Alignment within 2cm tolerance (dist={dist:.3f}m).", 1)
+                    # Keep current EE coordinates as our descent target
+                    ee = p(await client.call_tool("get_end_effector_pose"))["position"]
+                    place_x, place_y = ee["x"], ee["y"]
+
             # 10. Place descend
             r = p(await client.call_tool("move_pose", {
-                "target_pos": [DEST_X, DEST_Y, target_z + PLACE_Z],
+                "target_pos": [place_x, place_y, target_z + PLACE_Z],
                 "target_quat": POS_QUAT,
             }))
             log(f"  Place     err={r.get('pos_err', 0):.4f}m", 1)
@@ -221,7 +256,7 @@ async def main():
 
             # 12. Retreat
             r = p(await client.call_tool("move_pose", {
-                "target_pos": [DEST_X, DEST_Y, target_z + RETREAT_Z],
+                "target_pos": [place_x, place_y, target_z + RETREAT_Z],
                 "target_quat": POS_QUAT,
             }))
             log(f"  Retreat   err={r.get('pos_err', 0):.4f}m", 1)
