@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import time
 from typing import Any, Sequence
 
 import mujoco
@@ -746,6 +747,102 @@ class KinovaMuJoCoBackend(KinovaBackend):
             if np.isfinite(low) and np.isfinite(high):
                 q_target[idx] = low + (1.0 - p) * (high - low)
         self._q_target_desired = self._clip_q(q_target)
+
+    def get_gripper_state(self) -> dict:
+        env = self._require_env()
+        q_target_desired = self._require_q_target_desired()
+
+        percents: list[float] = []
+        target_percents: list[float] = []
+        pos_errs: list[float] = []
+        vels: list[float] = []
+
+        for idx in self._finger_indices:
+            low, high = self._joint_limits[idx]
+            if not (np.isfinite(low) and np.isfinite(high) and high > low):
+                continue
+
+            q = float(env.data.qpos[self._qpos_adr[idx]])
+            q_target = float(q_target_desired[idx])
+            qd = abs(float(env.data.qvel[self._qvel_adr[idx]]))
+
+            percent = 1.0 - ((q - low) / (high - low))
+            target_percent = 1.0 - ((q_target - low) / (high - low))
+
+            percents.append(float(np.clip(percent, 0.0, 1.0)))
+            target_percents.append(float(np.clip(target_percent, 0.0, 1.0)))
+            pos_errs.append(abs(q_target - q))
+            vels.append(qd)
+
+        max_pos_err = max(pos_errs) if pos_errs else None
+        max_vel = max(vels) if vels else None
+        percent = float(sum(percents) / len(percents)) if percents else None
+        target_percent = float(sum(target_percents) / len(target_percents)) if target_percents else None
+        opening = (
+            percent is not None
+            and target_percent is not None
+            and target_percent >= percent
+        )
+        settled = False
+        if max_vel is not None:
+            if opening:
+                settled = bool(max_pos_err is not None and max_pos_err <= 0.05 and max_vel <= 0.2)
+            else:
+                settled = bool(max_vel <= 0.2)
+
+        return {
+            "percent": percent,
+            "target_percent": target_percent,
+            "max_pos_err": max_pos_err,
+            "max_vel": max_vel,
+            "settled": settled,
+        }
+
+    def wait_for_gripper(
+        self,
+        timeout_s: float = 5.0,
+        hold_seconds: float = 0.2,
+        hz: float = 500.0,
+        pos_tol_rad: float = 0.05,
+        vel_tol_rad_s: float = 0.2,
+    ) -> bool:
+        deadline = time.monotonic() + float(timeout_s)
+        dt = 1.0 / float(hz)
+        settled_since: float | None = None
+
+        while time.monotonic() < deadline:
+            self.step()
+            state = self.get_gripper_state()
+            percent = state.get("percent")
+            target_percent = state.get("target_percent")
+            max_pos_err = state.get("max_pos_err")
+            max_vel = state.get("max_vel")
+            opening = (
+                percent is not None
+                and target_percent is not None
+                and target_percent >= percent
+            )
+            if opening:
+                settled = bool(
+                    max_pos_err is not None
+                    and max_vel is not None
+                    and max_pos_err <= float(pos_tol_rad)
+                    and max_vel <= float(vel_tol_rad_s)
+                )
+            else:
+                settled = bool(max_vel is not None and max_vel <= float(vel_tol_rad_s))
+
+            if settled:
+                if settled_since is None:
+                    settled_since = time.monotonic()
+                if time.monotonic() - settled_since >= float(hold_seconds):
+                    return True
+            else:
+                settled_since = None
+
+            time.sleep(dt)
+
+        return False
 
     def get_finger_forces(self) -> dict:
         """Read current actuator forces for finger joints.

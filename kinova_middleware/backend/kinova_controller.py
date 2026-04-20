@@ -109,6 +109,27 @@ class KinovaController:
         """Read current actuator forces for finger joints."""
         return self._backend.get_finger_forces()
 
+    def get_gripper_state(self) -> dict:
+        """Read current gripper state when supported by the backend."""
+        return self._backend.get_gripper_state()
+
+    def wait_for_gripper(
+        self,
+        timeout_s: float = 5.0,
+        hold_seconds: float = 0.2,
+        hz: float = 500.0,
+        pos_tol_rad: float = 0.05,
+        vel_tol_rad_s: float = 0.2,
+    ) -> bool:
+        """Block until the gripper finishes moving, when supported by the backend."""
+        return self._backend.wait_for_gripper(
+            timeout_s=timeout_s,
+            hold_seconds=hold_seconds,
+            hz=hz,
+            pos_tol_rad=pos_tol_rad,
+            vel_tol_rad_s=vel_tol_rad_s,
+        )
+
     def open_fingers(self, percent: float) -> None:
         """Open the gripper by percent in [0.0, 1.0] (1.0 = fully open)."""
         self.set_gripper_percent(percent)

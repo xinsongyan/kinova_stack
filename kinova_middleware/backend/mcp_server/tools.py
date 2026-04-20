@@ -113,8 +113,31 @@ def setup_tools(mcp: FastMCP, state: dict):
         ctrl = get_controller()
         p = max(0.0, min(1.0, float(percent)))
         with motion_lock:
-            ctrl.set_gripper_percent(p)
-            run_until_reached(timeout_s=5.0, hold_seconds=0.3)
+            current_percent = None
+            try:
+                state = ctrl.get_gripper_state()
+                current_percent = state.get("percent")
+            except Exception:
+                current_percent = None
+
+            commands = [p]
+            if current_percent is not None and p > current_percent + 0.15:
+                n_steps = max(2, min(5, math.ceil((p - current_percent) / 0.12)))
+                commands = [
+                    current_percent + (p - current_percent) * ((i + 1) / n_steps)
+                    for i in range(n_steps)
+                ]
+
+            for i, cmd_percent in enumerate(commands):
+                ctrl.set_gripper_percent(cmd_percent)
+                final_step = i == len(commands) - 1
+                ctrl.wait_for_gripper(
+                    timeout_s=5.0 if final_step else 1.0,
+                    hold_seconds=0.2 if final_step else 0.05,
+                    hz=500.0,
+                    pos_tol_rad=0.05,
+                    vel_tol_rad_s=0.2,
+                )
 
         try:
             force_info = ctrl.get_finger_forces()

@@ -33,6 +33,7 @@ STANDARD OPERATING PROCEDURE FOR EACH OBJECT:
 8. **Lift Safely**: Call `move_pose` using the current x,y, and Z = top_height + 0.20.
    CRITICAL: Use `target_quat=[0.0, 0.0, 0.0, 0.0]` and pass the argument `"move_wrist": False` to prevent IK orientation failures while lifting straight up.
 9. **Verify Lift**: If the local client tool `verify_object_lift(body_name='<target>')` is available, call it after the lift and use it to confirm the object is high enough before moving on.
+10. **Drop the object**: Call `set_gripper(percent=1.0)` to release the object.
 
 Once you receive confirmation for all three objects (box, sphere, red_cylinder), state "All tasks complete."
 

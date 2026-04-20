@@ -9,6 +9,7 @@ through MCP tool calls.
 
 Usage:
   python kinova_middleware/llm_clients/ultimate_llm.py --task "sort the cubes"
+  python kinova_middleware/llm_clients/ultimate_llm.py
 """
 
 import argparse
@@ -35,7 +36,7 @@ from helper_functions import (
 )
 
 
-MODEL_NAME = "deepseek-ai/deepseek-v3.1"
+MODEL_NAME = "openai/gpt-oss-120b"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 SYSTEM_PROMPT = """
@@ -81,10 +82,13 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description="Unified Kinova LLM client.")
     parser.add_argument(
         "--task",
-        default="stack the blue_cube onto the red_cube",
+        default=None,
         help="Free-form user request. The agent routes it to grab_shapes, sort_cubes, or stack_cubes.",
     )
     args = parser.parse_args()
+    task = args.task.strip() if args.task else input("Enter the task for the Kinova agent: ").strip()
+    if not task:
+        sys.exit("Error: task cannot be empty.")
 
     api_key = os.environ.get("NVIDIA_API_KEY")
     if not api_key:
@@ -108,7 +112,7 @@ async def main() -> None:
             llm_with_tools = llm.bind_tools([tool["function"] for tool in tools_schema])
             messages = [
                 SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=args.task),
+                HumanMessage(content=task),
             ]
 
             iteration = 1

@@ -164,6 +164,32 @@ class KinovaBackend(ABC):
         """Read current finger actuator forces. Override in sim backends."""
         return {"forces": [], "max_abs_force": 0.0, "contact_detected": False}
 
+    def get_gripper_state(self) -> dict:
+        """Read gripper state when the backend can estimate it."""
+        return {
+            "percent": None,
+            "target_percent": None,
+            "max_pos_err": None,
+            "max_vel": None,
+            "settled": True,
+        }
+
+    def wait_for_gripper(
+        self,
+        timeout_s: float = 5.0,
+        hold_seconds: float = 0.2,
+        hz: float = 500.0,
+        pos_tol_rad: float = 0.05,
+        vel_tol_rad_s: float = 0.2,
+    ) -> bool:
+        """Best-effort wait for the gripper to settle.
+
+        Backends with explicit physics stepping should override this.
+        """
+        if hold_seconds > 0:
+            time.sleep(min(float(timeout_s), float(hold_seconds)))
+        return True
+
     def rotate_wrist(self, angle_deg: float) -> None:
         """Rotate the wrist (last arm joint) by a relative angle in degrees.
 
@@ -322,6 +348,25 @@ class SafetyWrapperBackend(KinovaBackend):
 
     def get_finger_forces(self) -> dict:
         return self._inner.get_finger_forces()
+
+    def get_gripper_state(self) -> dict:
+        return self._inner.get_gripper_state()
+
+    def wait_for_gripper(
+        self,
+        timeout_s: float = 5.0,
+        hold_seconds: float = 0.2,
+        hz: float = 500.0,
+        pos_tol_rad: float = 0.05,
+        vel_tol_rad_s: float = 0.2,
+    ) -> bool:
+        return self._inner.wait_for_gripper(
+            timeout_s=timeout_s,
+            hold_seconds=hold_seconds,
+            hz=hz,
+            pos_tol_rad=pos_tol_rad,
+            vel_tol_rad_s=vel_tol_rad_s,
+        )
 
     def rotate_wrist(self, angle_deg: float) -> None:
         self._inner.rotate_wrist(angle_deg)
