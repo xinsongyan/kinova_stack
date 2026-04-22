@@ -25,6 +25,7 @@ from helper_functions import (
     CHECK_STACKING_STATUS_TOOL,
     FINISH_TASK_TOOL,
     VERIFY_OBJECT_LIFT_TOOL,
+    bind_model_tools,
     build_retry_tool_message,
     check_sorting_progress,
     check_stacking_status,
@@ -38,6 +39,7 @@ from helper_functions import (
 
 MODEL_NAME = "openai/gpt-oss-120b"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
+MAX_AGENT_STEPS = 50
 
 SYSTEM_PROMPT = """
 You are a Kinova robot control agent that can handle exactly three workflows:
@@ -75,7 +77,11 @@ def build_local_tools() -> list[dict]:
 
 async def build_tools_schema(mcp_client) -> list[dict]:
     """Load MCP tools and prompts, then add local client-only helpers."""
-    return await load_tools_and_prompts_from_mcp(mcp_client, extra_tools=build_local_tools())
+    return await load_tools_and_prompts_from_mcp(
+        mcp_client,
+        extra_tools=build_local_tools(),
+        skip_reset_scene=True,
+    )
 
 
 async def main() -> None:
@@ -109,14 +115,14 @@ async def main() -> None:
             tools_schema = await build_tools_schema(mcp_client)
             print(f"Successfully loaded {len(tools_schema)} callable tools (including prompt wrappers and local helpers).")
 
-            llm_with_tools = llm.bind_tools([tool["function"] for tool in tools_schema])
+            llm_with_tools = bind_model_tools(llm, tools_schema, tool_choice="required")
             messages = [
                 SystemMessage(content=SYSTEM_PROMPT),
                 HumanMessage(content=task),
             ]
 
             iteration = 1
-            while iteration <= 100:
+            while iteration <= MAX_AGENT_STEPS:
                 print(f"--- [Thinking - Step {iteration}] ---")
                 ai_msg = llm_with_tools.invoke(messages)
                 if ai_msg.content:
@@ -179,7 +185,7 @@ async def main() -> None:
 
                 iteration += 1
             else:
-                print("Safety Break: Too many iterations.")
+                print(f"Safety Break: Reached the maximum of {MAX_AGENT_STEPS} iterations.")
 
     except Exception as exc:
         print(f"Execution failed: {exc}")

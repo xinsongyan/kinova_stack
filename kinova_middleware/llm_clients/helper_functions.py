@@ -22,6 +22,8 @@ CHECK_STACKING_STATUS_TOOL = {
     },
 }
 
+GRAB_SHAPES_TARGETS = ("box", "sphere", "red_cylinder")
+
 VERIFY_OBJECT_LIFT_TOOL = {
     "type": "function",
     "function": {
@@ -63,9 +65,13 @@ FINISH_TASK_TOOL = {
 }
 
 
-async def load_tools_and_prompts_from_mcp(mcp_client, extra_tools=None, skip_reset_scene=False):
+async def load_tools_and_prompts_from_mcp(mcp_client, extra_tools=None, skip_reset_scene=True):
     """
     Load MCP tools and prompts, and optionally append local client-only tools.
+
+    By default, `reset_scene` is hidden from the LLM tool schema so the model
+    cannot reset the environment on its own. Clients can still call the MCP tool
+    directly outside the schema when they need a deterministic benchmark reset.
     """
     print("Fetching tools from MCP server...")
     try:
@@ -123,6 +129,26 @@ async def load_tools_and_prompts_from_mcp(mcp_client, extra_tools=None, skip_res
     except Exception as e:
         print(f"Failed to load tools and prompts: {e}")
         return []
+
+
+def bind_model_tools(llm, tools_schema: list[dict], tool_choice: str | None = "required"):
+    """Bind tools to an LLM with a provider-compatible tool choice mode.
+
+    The default `required` mode avoids OpenAI-compatible servers such as vLLM
+    that reject implicit/auto tool choice unless extra server flags are set.
+    Use `tool_choice="default"` to let the provider choose its own default.
+    """
+    normalized_tool_choice = tool_choice
+    if isinstance(normalized_tool_choice, str):
+        normalized_tool_choice = normalized_tool_choice.strip().lower()
+        if normalized_tool_choice in {"", "default"}:
+            normalized_tool_choice = None
+
+    bind_kwargs = {}
+    if normalized_tool_choice is not None:
+        bind_kwargs["tool_choice"] = normalized_tool_choice
+
+    return llm.bind_tools([tool["function"] for tool in tools_schema], **bind_kwargs)
 
 
 async def handle_prompt_tool_call(mcp_client, func_name, args):
@@ -301,6 +327,166 @@ async def verify_object_lift(mcp_client, body_name: str, min_height: float = 0.1
         return summary
     except Exception as e:
         return f"LIFT CHECK ERROR for '{body_name}': {str(e)}"
+
+
+def record_grab_verification(verification_history: dict, body_name: str, result: str, min_height: float) -> None:
+    """Store the official outcome of a verify_object_lift tool call."""
+    status = "error"
+    passed = False
+    z_height = None
+
+    if "PASS:" in result:
+        status = "pass"
+        passed = True
+    elif "FAIL:" in result:
+        status = "fail"
+
+    match = re.search(r"z=([0-9.+-]+)", result)
+    if match:
+        try:
+            z_height = float(match.group(1))
+        except ValueError:
+            z_height = None
+
+    event = {
+        "status": status,
+        "passed": passed,
+        "z_height": z_height,
+        "min_height": float(min_height),
+        "raw_result": result,
+    }
+    history = verification_history.setdefault(body_name, {"attempts": []})
+    history["attempts"].append(event)
+
+
+async def collect_grab_shapes_report(
+    mcp_client,
+    verification_history: dict,
+    targets: tuple[str, ...] = GRAB_SHAPES_TARGETS,
+    default_min_height: float = 0.12,
+) -> dict:
+    """Build a scene-grounded final report for the grab_shapes workflow."""
+    objects = []
+    verified_count = 0
+
+    for body_name in targets:
+        history = verification_history.get(body_name, {})
+        attempts = history.get("attempts", [])
+        successful_attempt = next((attempt for attempt in reversed(attempts) if attempt.get("passed")), None)
+        latest_attempt = attempts[-1] if attempts else None
+
+        try:
+            result = await mcp_client.call_tool("get_object_pose", {"body_name": body_name})
+            data = result.structured_content or {}
+        except Exception as exc:
+            data = {"status": "error", "message": str(exc)}
+
+        if data.get("status") == "error":
+            objects.append(
+                {
+                    "body_name": body_name,
+                    "officially_picked_up": bool(successful_attempt),
+                    "attempt_count": len(attempts),
+                    "latest_attempt": latest_attempt,
+                    "successful_attempt": successful_attempt,
+                    "current_pose_error": data.get("message", "Unknown error"),
+                }
+            )
+            if successful_attempt:
+                verified_count += 1
+            continue
+
+        position = data.get("position", {})
+        current_z = float(position.get("z", 0.0))
+        min_height = (
+            successful_attempt.get("min_height")
+            if successful_attempt is not None
+            else latest_attempt.get("min_height", default_min_height)
+            if latest_attempt is not None
+            else float(default_min_height)
+        )
+        currently_elevated = current_z >= min_height
+
+        object_report = {
+            "body_name": body_name,
+            "officially_picked_up": bool(successful_attempt),
+            "attempt_count": len(attempts),
+            "latest_attempt": latest_attempt,
+            "successful_attempt": successful_attempt,
+            "current_pose": {
+                "x": float(position.get("x", 0.0)),
+                "y": float(position.get("y", 0.0)),
+                "z": current_z,
+            },
+            "currently_elevated": currently_elevated,
+            "min_height": float(min_height),
+        }
+        objects.append(object_report)
+        if successful_attempt:
+            verified_count += 1
+
+    return {
+        "workflow": "grab_shapes",
+        "targets": list(targets),
+        "verified_count": verified_count,
+        "target_count": len(targets),
+        "objects": objects,
+    }
+
+
+def format_grab_shapes_report(report: dict) -> str:
+    """Format a grab_shapes verification report for terminal output."""
+    lines = ["OFFICIAL GRAB REPORT:"]
+
+    for obj in report.get("objects", []):
+        name = obj["body_name"]
+        attempt_count = obj.get("attempt_count", 0)
+        successful_attempt = obj.get("successful_attempt")
+        latest_attempt = obj.get("latest_attempt")
+
+        if obj.get("current_pose_error"):
+            status = "OFFICIALLY PICKED UP" if obj.get("officially_picked_up") else "NOT OFFICIALLY PICKED UP"
+            lines.append(
+                f"- {name}: {status}. Could not read final pose: {obj['current_pose_error']} "
+                f"(verify attempts={attempt_count})."
+            )
+            continue
+
+        pose = obj["current_pose"]
+        if successful_attempt:
+            if obj.get("currently_elevated"):
+                final_state = "still elevated at the end of the run"
+            else:
+                final_state = "not elevated at the end of the run"
+            lines.append(
+                f"- {name}: OFFICIALLY PICKED UP. verify_object_lift passed "
+                f"(z={successful_attempt.get('z_height', 0.0):.3f} m, threshold={obj['min_height']:.3f} m). "
+                f"Final pose=({pose['x']:.3f}, {pose['y']:.3f}, {pose['z']:.3f}) and the object is {final_state}. "
+                f"(verify attempts={attempt_count})"
+            )
+            continue
+
+        if latest_attempt and latest_attempt.get("status") == "fail":
+            verification_note = (
+                f"latest verify_object_lift failed "
+                f"(z={latest_attempt.get('z_height', 0.0):.3f} m, threshold={latest_attempt.get('min_height', obj['min_height']):.3f} m)"
+            )
+        elif latest_attempt and latest_attempt.get("status") == "error":
+            verification_note = "latest verify_object_lift returned an error"
+        else:
+            verification_note = "verify_object_lift was never called successfully"
+
+        lines.append(
+            f"- {name}: NOT OFFICIALLY PICKED UP. {verification_note}. "
+            f"Final pose=({pose['x']:.3f}, {pose['y']:.3f}, {pose['z']:.3f}). "
+            f"(verify attempts={attempt_count})"
+        )
+
+    lines.append("")
+    lines.append(
+        f"MISSION STATUS: Officially picked up {report.get('verified_count', 0)}/{report.get('target_count', 0)} target objects."
+    )
+    return "\n".join(lines)
 
 
 async def verify_lift(mcp_client, body_name):

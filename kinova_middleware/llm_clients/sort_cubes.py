@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from helper_functions import (
     CHECK_SORTING_STATUS_TOOL,
     FINISH_TASK_TOOL,
+    bind_model_tools,
     build_retry_tool_message,
     check_sorting_progress,
     execute_mcp_tool,
@@ -29,6 +30,7 @@ from helper_functions import (
 # =========================================================================
 MODEL_NAME = "deepseek-ai/deepseek-v3.1"
 BASE_URL = "https://integrate.api.nvidia.com/v1"
+MAX_AGENT_STEPS = 50
 
 SYSTEM_PROMPT = """
 You are controlling a Kinova robot through MCP tools to perform a sorting task.
@@ -87,12 +89,13 @@ async def main():
             tools_schema = await load_tools_and_prompts_from_mcp(
                 mcp_client,
                 extra_tools=[CHECK_SORTING_STATUS_TOOL, FINISH_TASK_TOOL],
+                skip_reset_scene=True,
             )
                 
             print(f"Successfully loaded {len(tools_schema)} callable tools (including local tools)!")
             
             # 4. Bind the extracted tools to our Langchain Agent
-            llm_with_tools = llm.bind_tools([t["function"] for t in tools_schema])
+            llm_with_tools = bind_model_tools(llm, tools_schema, tool_choice="required")
             
             # Injecting a universal identity hint
             messages = [
@@ -102,7 +105,7 @@ async def main():
             
             # Infinite Action Loop (stops when LLM gives up or finishes)
             iteration = 1
-            while True:
+            while iteration <= MAX_AGENT_STEPS:
                 print(f"--- [Thinking - Step {iteration}] ---")
                 
                 # Predict next action
@@ -160,9 +163,8 @@ async def main():
                     )
                     
                 iteration += 1
-                if iteration > 100:
-                    print("Safety Break: Too many iterations.")
-                    break
+            else:
+                print(f"Safety Break: Reached the maximum of {MAX_AGENT_STEPS} iterations.")
 
     except Exception as e:
         print(f"Execution failed: {e}")

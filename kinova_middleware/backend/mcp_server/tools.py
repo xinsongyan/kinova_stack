@@ -1,8 +1,44 @@
 import logging
 import math
+import ast
+from typing import Any
 from fastmcp import FastMCP
 
 log = logging.getLogger("mcp_kinova")
+
+def _coerce_to_float_list(value: Any, name: str) -> list[float]:
+    """Coerce incoming value to a list of floats.
+
+    Accepts actual lists/tuples of numbers or string-encoded lists like
+    "[0.03, 0.09]". Raises ValueError when conversion fails.
+    """
+    if isinstance(value, (list, tuple)):
+        try:
+            return [float(v) for v in value]
+        except Exception as exc:
+            raise ValueError(f"{name} must contain numeric elements ({exc})") from exc
+
+    if isinstance(value, str):
+        # Try safe literal eval first (handles '[1, 2]' and '(1,2)')
+        try:
+            parsed = ast.literal_eval(value)
+        except Exception:
+            parsed = None
+
+        if isinstance(parsed, (list, tuple)):
+            try:
+                return [float(v) for v in parsed]
+            except Exception as exc:
+                raise ValueError(f"{name} must contain numeric elements ({exc})") from exc
+
+        # Fallback: split on commas for simple CSV-like strings
+        try:
+            parts = [p.strip() for p in value.strip().strip('()[]').split(',') if p.strip()]
+            return [float(p) for p in parts]
+        except Exception as exc:
+            raise ValueError(f"Could not parse {name} from string: {exc}") from exc
+
+    raise ValueError(f"{name} must be a list or string-encoded list; got {type(value).__name__}")
 
 def setup_tools(mcp: FastMCP, state: dict):
     """Register Kinova tools with the MCP server."""
@@ -31,28 +67,30 @@ def setup_tools(mcp: FastMCP, state: dict):
         dot = min(dot, 1.0)
         return 2.0 * math.acos(dot)
 
+    # ...continued inside setup_tools...
+
     # ── Tool 0: reset_scene ──────────────────────────────────────────────────
-    # @mcp.tool()
-    # def reset_scene() -> dict:
-    #     """Reset the simulation physics, returning the environment to its initial state.
-        
-    #     Returns:
-    #         status: "ok" or "error"
-    #         message: human-readable result
-    #     """
-    #     log.info("Tool  reset_scene()")
-    #     ctrl = get_controller()
-        
-    #     with motion_lock:
-    #         with physics_lock:
-    #             try:
-    #                 ctrl.reset_scene()
-    #             except Exception as e:
-    #                 log.error("reset_scene failed: %s", e)
-    #                 return {"status": "error", "message": f"Reset failed: {e}"}
-                    
-    #     log.info("  → Scene reset successfully.")
-    #     return {"status": "ok", "message": "Scene reset successfully."}
+    @mcp.tool()
+    def reset_scene() -> dict:
+        """Reset the simulation physics, returning the environment to its initial state.
+
+        Returns:
+            status: "ok" or "error"
+            message: human-readable result
+        """
+        log.info("Tool  reset_scene()")
+        ctrl = get_controller()
+
+        with motion_lock:
+            with physics_lock:
+                try:
+                    ctrl.reset_scene()
+                except Exception as e:
+                    log.error("reset_scene failed: %s", e)
+                    return {"status": "error", "message": f"Reset failed: {e}"}
+
+        log.info("  → Scene reset successfully.")
+        return {"status": "ok", "message": "Scene reset successfully."}
 
     # ── Tool 1: move_home ──────────────────────────────────────────────────────
     @mcp.tool()
@@ -157,17 +195,17 @@ def setup_tools(mcp: FastMCP, state: dict):
     # ── Tool 6: move_pose ────────────────────────────────────────────────────
     @mcp.tool()
     def move_pose(
-        target_pos: list[float],
-        target_quat: list[float],
-        seed_q_rad: list[float] | None = None,
+        target_pos: list[float] | str,
+        target_quat: list[float] | str,
+        seed_q_rad: list[float] | str | None = None,
         allow_orientation_fallback: bool = True,
         move_wrist: bool = True,
     ) -> dict:
         """Move the end-effector to a Cartesian pose (IK → joint command → block).
 
         Args:
-            target_pos: [x, y, z] in metres
-            target_quat: [qx, qy, qz, qw] unit quaternion
+            target_pos: [x, y, z] in metres, or a string-encoded list
+            target_quat: [qx, qy, qz, qw] unit quaternion, or a string-encoded list
             seed_q_rad: optional IK seed (arm joints)
             allow_orientation_fallback: if True and quaternion is invalid,
                 fall back to position-only IK
@@ -183,6 +221,14 @@ def setup_tools(mcp: FastMCP, state: dict):
             rot_err: rotation error (rad), null if position-only
         """
         ctrl = get_controller()
+        try:
+            target_pos = _coerce_to_float_list(target_pos, "target_pos")
+            target_quat = _coerce_to_float_list(target_quat, "target_quat")
+            if seed_q_rad is not None:
+                seed_q_rad = _coerce_to_float_list(seed_q_rad, "seed_q_rad")
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
         log.info("Tool  move_pose(pos=%s, quat=%s, move_wrist=%s)", target_pos, target_quat, move_wrist)
 
         if len(target_pos) != 3:
@@ -397,8 +443,14 @@ def setup_tools(mcp: FastMCP, state: dict):
         return _get_body_info(body_id)
 
     @mcp.tool()
-    def compute_grasp_height(geom_type: str, size: list[float], quat_xyzw: list[float]) -> dict:
-        """Compute the height of the object's top surface above its body origin."""
+    def compute_grasp_height(geom_type: str, size: list[float] | str, quat_xyzw: list[float] | str) -> dict:
+        """Compute the height of the object's top surface above its body origin.
+
+        This tool accepts `size` and `quat_xyzw` either as native lists/tuples of
+        numbers or as string-encoded lists like "[0.03, 0.09]". It will coerce
+        string inputs to real lists and return a helpful error message if
+        coercion fails.
+        """
         valid_types = ["cylinder", "box", "sphere"]
         if geom_type not in valid_types:
             return {
@@ -407,40 +459,66 @@ def setup_tools(mcp: FastMCP, state: dict):
                 "top_height": 0.0,
             }
 
-        qx, qy, qz, qw = quat_xyzw
+        try:
+            size_list = _coerce_to_float_list(size, "size")
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "top_height": 0.0}
+
+        try:
+            quat_list = _coerce_to_float_list(quat_xyzw, "quat_xyzw")
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc), "top_height": 0.0}
+
+        if len(quat_list) != 4:
+            return {"status": "error", "message": "quat_xyzw must have 4 elements", "top_height": 0.0}
+
+        qx, qy, qz, qw = quat_list
         top_z = 0.0
 
         if geom_type == "cylinder":
-            if len(size) < 2:
-                 return {"status": "error", "message": "Cylinder size must be [radius, half_height]", "top_height": 0.0}
-            radius, half_height = size[0], size[1]
+            if len(size_list) < 2:
+                return {"status": "error", "message": "Cylinder size must be [radius, half_height]", "top_height": 0.0}
+            radius, half_height = float(size_list[0]), float(size_list[1])
             axis_world = _quat_rotate([qx, qy, qz, qw], [0, 0, half_height])
             rx = _quat_rotate([qx, qy, qz, qw], [radius, 0, 0])
             ry = _quat_rotate([qx, qy, qz, qw], [0, radius, 0])
-            top_z = abs(axis_world[2]) + max(abs(rx[2]), abs(ry[2])) 
+            top_z = abs(axis_world[2]) + max(abs(rx[2]), abs(ry[2]))
 
         elif geom_type == "box":
-            if len(size) < 3:
-                 return {"status": "error", "message": "Box size must be [hx, hy, hz]", "top_height": 0.0}
-            hx, hy, hz = size[0], size[1], size[2]
+            if len(size_list) < 3:
+                return {"status": "error", "message": "Box size must be [hx, hy, hz]", "top_height": 0.0}
+            hx, hy, hz = float(size_list[0]), float(size_list[1]), float(size_list[2])
             vx = _quat_rotate([qx, qy, qz, qw], [hx, 0, 0])
             vy = _quat_rotate([qx, qy, qz, qw], [0, hy, 0])
             vz = _quat_rotate([qx, qy, qz, qw], [0, 0, hz])
             top_z = abs(vx[2]) + abs(vy[2]) + abs(vz[2])
 
         elif geom_type == "sphere":
-            if len(size) < 1:
-                 return {"status": "error", "message": "Sphere size must be [radius]", "top_height": 0.0}
-            top_z = size[0]
+            if len(size_list) < 1:
+                return {"status": "error", "message": "Sphere size must be [radius]", "top_height": 0.0}
+            top_z = float(size_list[0])
 
         return {"status": "ok", "top_height": round(top_z + 0.03, 4)}
 
     @mcp.tool()
-    def compute_wrist_alignment(obj_quat_xyzw: list[float], ee_quat_xyzw: list[float]) -> dict:
-        """Compute the wrist rotation needed to align the EE X-axis with the object's long axis."""
-        cyl_axis = _quat_rotate(obj_quat_xyzw, [0, 0, 1])
+    def compute_wrist_alignment(obj_quat_xyzw: list[float] | str, ee_quat_xyzw: list[float] | str) -> dict:
+        """Compute the wrist rotation needed to align the EE X-axis with the object's long axis.
+
+        Accepts quaternion inputs as lists/tuples or string-encoded lists; coerces them
+        and returns a helpful error on failure.
+        """
+        try:
+            obj_q = _coerce_to_float_list(obj_quat_xyzw, "obj_quat_xyzw")
+            ee_q = _coerce_to_float_list(ee_quat_xyzw, "ee_quat_xyzw")
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+
+        if len(obj_q) != 4 or len(ee_q) != 4:
+            return {"status": "error", "message": "Quaternions must have 4 elements"}
+
+        cyl_axis = _quat_rotate(obj_q, [0, 0, 1])
         cyl_angle = math.atan2(cyl_axis[1], cyl_axis[0])
-        ee_x = _quat_rotate(ee_quat_xyzw, [1, 0, 0])
+        ee_x = _quat_rotate(ee_q, [1, 0, 0])
         ee_x_angle = math.atan2(ee_x[1], ee_x[0])
         diff_rad = cyl_angle - ee_x_angle
         diff_rad = (diff_rad + math.pi) % (2 * math.pi) - math.pi
