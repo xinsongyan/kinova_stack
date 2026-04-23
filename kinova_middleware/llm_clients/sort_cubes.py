@@ -1,173 +1,280 @@
 #!/usr/bin/env python3
 """
-Universal FastMCP Agent - Sorting Cubes
-=======================
+Dedicated sort_cubes LLM client.
 
-This script uses LangChain to connect to the FastMCP server and dynamically load 
-tools to sort cubes into bins based on color.
+This client uses the same routing prompt as `ultimate_llm.py`, but it is
+preconfigured for the `sort_cubes` workflow and includes the local sorting
+status helper for progress checks.
+
+Examples:
+  python kinova_middleware/llm_clients/sort_cubes.py
+  python kinova_middleware/llm_clients/sort_cubes.py --model openai/gpt-oss-120b
 """
 
+import argparse
 import asyncio
+import json
 import os
 import sys
+
 from fastmcp import Client
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+
 from helper_functions import (
     CHECK_SORTING_STATUS_TOOL,
     FINISH_TASK_TOOL,
     bind_model_tools,
+    build_action_reference,
+    build_reasoned_action_tool,
     build_retry_tool_message,
     check_sorting_progress,
     execute_mcp_tool,
     finish_task,
+    format_action_result,
+    invoke_with_rate_limit_retry,
     load_tools_and_prompts_from_mcp,
     parse_raw_tool_calls,
+    reset_scene_if_available,
 )
 
-# =========================================================================
-# CONFIGURATION
-# =========================================================================
-MODEL_NAME = "deepseek-ai/deepseek-v3.1"
-BASE_URL = "https://integrate.api.nvidia.com/v1"
-MAX_AGENT_STEPS = 50
+
+DEFAULT_MODEL_NAME = "moonshotai/kimi-k2-instruct-0905"
+DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_SERVER_URL = "http://127.0.0.1:8000/mcp"
+DEFAULT_SCENE_NAME = "sorting_task.xml"
+DEFAULT_TASK = "Sort all cubes into their matching bins."
+MAX_AGENT_STEPS = 70
 
 SYSTEM_PROMPT = """
-You are controlling a Kinova robot through MCP tools to perform a sorting task.
-Your mission is to sort all red cubes into the red bin ("red_bin_target") and all blue cubes into the blue bin ("blue_bin_target").
+You are a Kinova robot control agent that can handle exactly three workflows:
+- `grab_shapes`
+- `sort_cubes`
+- `stack_cubes`
 
-CRITICAL TOOL RULES:
-- **ONLY** use tools that are officially provided in the tool schema.
-- **NEVER** invent or use a tool called `pick_cube` or `place_cube`. They DO NOT exist.
-- You MUST execute the full 7-step pick sequence manually for every object.
-- **ONLY** use the structured tool-calling format (no raw `<|tool_calls|>` text in the response).
+Routing rules:
+1. Read the user's request and choose exactly one of the three workflows.
+2. Before doing any task-specific action, fetch the matching SOP from the MCP server:
+   - `get_prompt_grab_shapes`
+   - `get_prompt_sort_cubes`
+   - `get_prompt_stack_cubes(bottom_block='...', top_block='...')`
+3. After fetching that prompt, follow its instructions closely and use the available tools accordingly.
+4. Local helper tools are available when relevant:
+   - `check_sorting_status` for sorting progress and completion checks
+   - `finish_task` to end the run when the task is done
+5. If the user's request is ambiguous between workflows, ask one short clarification question instead of guessing.
 
-Mission objective:
-1. Use `check_sorting_status()` to identify the status of all cubes.
-2. For each cube marked as "At Starting Position":
-   a. Identify its color and target bin.
-   b. Execute a precise 7-step pick-and-place sequence (see below).
-3. Finish when `check_sorting_status()` reports "MISSION STATUS: ALL CUBES SORTED SUCCESSFULLY".
+Tool rules:
+- Use only tools present in the action reference.
+- Never invent `pick_cube`, `place_cube`, or any other missing helper tools.
+- Use the single structured wrapper tool `call_tool_with_reason` for every action.
+- For every action, provide:
+  - `reason`: one short sentence explaining what you are about to do and why
+  - `tool_name`: the exact action name from the action reference
+  - `tool_args`: a JSON object containing the arguments for that action
+- Example:
+  - `reason`: "I am going to check the cube positions so I know which cubes are actionable."
+  - `tool_name`: `check_sorting_status`
+  - `tool_args`: `{}`
+- Exactly one `call_tool_with_reason` call is allowed per assistant turn.
+- Do not bundle multiple actions into one response. Wait for the tool result before deciding the next action.
+- Do not call more than one task prompt unless the user changes the task.
+- Keep execution sequential and grounded in tool outputs.
 
-Detailed 7-Step Pick Sequence (REQUIRED):
-1. `get_object_pose(body_name='...')` and `compute_grasp_height(...)`.
-2. `move_pose` to `[x, y, top_height + 0.10]` with `target_quat=[0,0,0,0]` (Approach).
-3. `get_end_effector_pose()` and `compute_wrist_alignment(...)` to find rotation.
-4. `rotate_wrist(angle_deg)` to align the fingers.
-5. `move_pose` to `[x, y, top_height + 0.015]` with `target_quat=[0,0,0,0]` (Descend).
-6. `set_gripper(percent=0.54)` (Grasp).
-7. `move_pose` to `[x, y, top_height + 0.20]` with `move_wrist=False` (Lift).
-
-Safety and execution rules:
-- NEVER attempt to pick up any cube marked as "OUT OF WORKSPACE".
-- Focus strictly on cubes "At Starting Position".
-- never go above 0.24m in the z axis when pregrasping.
-- dont overthink ik error messages if the error is a couple of cm or less.
-
-Output style:
-- Briefly acknowledge the current state.
-- Proceed to the NEXT tool call immediately.
-- DO NOT summarize the whole task at once.
-- When sorting is complete, call `finish_task(summary=...)`.
+Completion rules for `sort_cubes`:
+- Use `check_sorting_status()` before starting physical actions so you know which cubes are actionable.
+- Use `check_sorting_status()` again whenever you need progress confirmation and before claiming success.
+- Do not claim the sorting task is complete unless the status report says all cubes are sorted successfully.
+- Call `finish_task(summary=...)` only after you have finished the task or cannot continue safely.
 """
 
-async def main():
+
+def build_local_tools() -> list[dict]:
+    """Return client-only helper tools for the sort_cubes workflow."""
+    return [CHECK_SORTING_STATUS_TOOL, FINISH_TASK_TOOL]
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(description="Dedicated sort_cubes LLM client.")
+    parser.add_argument("--task", default=DEFAULT_TASK, help="Task instruction for the model.")
+    parser.add_argument("--model", default=DEFAULT_MODEL_NAME, help="Model name to run.")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible API base URL.")
+    parser.add_argument("--server-url", default=DEFAULT_SERVER_URL, help="FastMCP server URL.")
+    parser.add_argument("--max-steps", type=int, default=MAX_AGENT_STEPS, help="Maximum agent iterations.")
+    parser.add_argument(
+        "--scene-number",
+        type=int,
+        default=None,
+        help=f"Optional 1-based scene number to load before the run. Defaults to {DEFAULT_SCENE_NAME}.",
+    )
+    parser.add_argument(
+        "--tool-choice",
+        default="required",
+        choices=["required", "auto", "none", "default"],
+        help="Tool-choice mode passed to the OpenAI-compatible model API.",
+    )
+    args = parser.parse_args()
+
+    if args.max_steps < 1:
+        sys.exit("Error: --max-steps must be at least 1.")
+
     api_key = os.environ.get("NVIDIA_API_KEY")
-    if not api_key: sys.exit("Error: NVIDIA_API_KEY not set in environment.")
-    print(f"Initializing DeepSeek Agent ({MODEL_NAME}) via NVIDIA...")
+    if not api_key:
+        sys.exit("Error: NVIDIA_API_KEY not set in environment.")
+
+    print(f"Initializing sort_cubes agent ({args.model}) via NVIDIA...")
     llm = ChatOpenAI(
-        model=MODEL_NAME, 
-        temperature=0, 
-        api_key=api_key, 
-        base_url=BASE_URL
+        model=args.model,
+        temperature=0,
+        api_key=api_key,
+        base_url=args.base_url,
     )
 
-    print(f"Connecting to FastMCP Server at http://127.0.0.1:8000/mcp ...")
+    print(f"Connecting to FastMCP Server at {args.server_url} ...")
     try:
-        async with Client("http://127.0.0.1:8000/mcp") as mcp_client:
-            print("Connected! Fetching server capabilities...")
+        async with Client(args.server_url) as mcp_client:
+            available_tool_names = {tool.name for tool in await mcp_client.list_tools()}
+            print(f"Connected! Server exposes {len(available_tool_names)} tools.")
+            await reset_scene_if_available(
+                mcp_client,
+                available_tool_names,
+                scene_name=DEFAULT_SCENE_NAME,
+                scene_number=args.scene_number,
+                total_runs=1,
+            )
+            print("Fetching server capabilities...")
             tools_schema = await load_tools_and_prompts_from_mcp(
                 mcp_client,
-                extra_tools=[CHECK_SORTING_STATUS_TOOL, FINISH_TASK_TOOL],
+                extra_tools=build_local_tools(),
                 skip_reset_scene=True,
             )
-                
-            print(f"Successfully loaded {len(tools_schema)} callable tools (including local tools)!")
-            
-            # 4. Bind the extracted tools to our Langchain Agent
-            llm_with_tools = bind_model_tools(llm, tools_schema, tool_choice="required")
-            
-            # Injecting a universal identity hint
+
+            print(f"Successfully loaded {len(tools_schema)} callable tools (including prompt wrappers and local helpers).")
+            action_reference = build_action_reference(tools_schema)
+            llm_with_tools = bind_model_tools(
+                llm,
+                [build_reasoned_action_tool(tools_schema)],
+                tool_choice=args.tool_choice,
+                parallel_tool_calls=False,
+            )
             messages = [
                 SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content="Use check_sorting_status() then sort all cubes on the table.")
+                SystemMessage(content=action_reference),
+                HumanMessage(content=args.task),
             ]
-            
-            # Infinite Action Loop (stops when LLM gives up or finishes)
+
             iteration = 1
-            while iteration <= MAX_AGENT_STEPS:
+            while iteration <= args.max_steps:
                 print(f"--- [Thinking - Step {iteration}] ---")
-                
-                # Predict next action
-                ai_msg = llm_with_tools.invoke(messages)
-                print(ai_msg.content)
+                ai_msg = invoke_with_rate_limit_retry(llm_with_tools, messages)
+                if ai_msg.content:
+                    print(ai_msg.content)
                 messages.append(ai_msg)
-                
-                # Check for tool calls (structured or raw text fallback)
-                tool_calls = ai_msg.tool_calls or []
-                
-                # Fallback: Parse raw text tool calls if model outputs tags directly in content
-                if not tool_calls and ai_msg.content and "<|tool▁call▁begin|>" in ai_msg.content:
-                    parsed_tool_calls, parse_errors = parse_raw_tool_calls(ai_msg.content, iteration)
-                    tool_calls.extend(parsed_tool_calls)
-                    messages.extend(parse_errors)
-                    if parse_errors and not tool_calls:
+
+                tool_calls = list(ai_msg.tool_calls or [])
+                if not tool_calls:
+                    fallback_calls, fallback_tool_messages = parse_raw_tool_calls(ai_msg.content, iteration)
+                    tool_calls.extend(fallback_calls)
+                    messages.extend(fallback_tool_messages)
+                    if fallback_tool_messages and not tool_calls:
                         tool_calls = [{"dummy": True}]
 
-                if tool_calls:
-                    for tool_call in tool_calls:
-                        if "dummy" in tool_call: continue # Skip the error marker
-                        if tool_call["name"] == "finish_task":
-                            result_str = await finish_task(mcp_client, tool_call["args"].get("summary", "Task finished."))
-                            messages.append(
-                                ToolMessage(
-                                    tool_call_id=tool_call.get("id", f"c_{iteration}"),
-                                    name=tool_call["name"],
-                                    content=result_str
-                                )
-                            )
-                            print(f"\n🤖 Agent Final Report: {tool_call['args'].get('summary', 'Task finished.')}")
-                            return
-                        result_str = await execute_mcp_tool(
-                            mcp_client, 
-                            tool_call["name"], 
-                            tool_call["args"],
-                            local_tool_handlers={
-                                "check_sorting_status": lambda client, tool_args: check_sorting_progress(client)
-                            },
-                        )
-                        # Return the result back into the Agent's context
-                        messages.append(
-                            ToolMessage(
-                                tool_call_id=tool_call.get("id", f"c_{iteration}"), 
-                                name=tool_call["name"], 
-                                content=result_str
-                            )
-                        )
-                else:
+                if not tool_calls:
                     messages.append(
                         build_retry_tool_message(
                             iteration,
-                            "No valid tool call was produced."
+                            "No valid tool call was produced.",
                         )
                     )
-                    
+                    iteration += 1
+                    continue
+
+                actionable_tool_calls = [tool_call for tool_call in tool_calls if "dummy" not in tool_call]
+                if len(actionable_tool_calls) > 1:
+                    print("   → Warning: model returned multiple actions in one step; executing only the first.")
+                    for extra_tool_call in actionable_tool_calls[1:]:
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=extra_tool_call["id"],
+                                name=extra_tool_call["name"],
+                                content=json.dumps(
+                                    {
+                                        "status": "error",
+                                        "message": (
+                                            "Only one `call_tool_with_reason` action is allowed per assistant turn. "
+                                            "This extra action was ignored. Wait for the next step before issuing another action."
+                                        ),
+                                    }
+                                ),
+                            )
+                        )
+                    tool_calls = [actionable_tool_calls[0]]
+
+                for tool_call in tool_calls:
+                    if "dummy" in tool_call:
+                        continue
+
+                    reason = str(tool_call["args"].get("reason", "")).strip()
+                    action_name = str(tool_call["args"].get("tool_name", "")).strip()
+                    action_args = tool_call["args"].get("tool_args", {})
+
+                    if not reason or not action_name or not isinstance(action_args, dict):
+                        result_str = json.dumps(
+                            {
+                                "status": "error",
+                                "message": (
+                                    "You must call `call_tool_with_reason` with non-empty `reason`, "
+                                    "valid `tool_name`, and object-valued `tool_args`."
+                                ),
+                            }
+                        )
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=tool_call["id"],
+                                name=tool_call["name"],
+                                content=result_str,
+                            )
+                        )
+                        continue
+
+                    print(f"   → Reason: {reason}")
+
+                    if action_name == "finish_task":
+                        result_str = await finish_task(mcp_client, action_args.get("summary", "Task finished."))
+                        messages.append(
+                            ToolMessage(
+                                tool_call_id=tool_call["id"],
+                                name=tool_call["name"],
+                                content=format_action_result(action_name, reason, result_str),
+                            )
+                        )
+                        print(f"\nFinal Report: {action_args.get('summary', 'Task finished.')}")
+                        return
+
+                    result_str = await execute_mcp_tool(
+                        mcp_client,
+                        action_name,
+                        action_args,
+                        local_tool_handlers={
+                            "check_sorting_status": lambda client, tool_args: check_sorting_progress(client),
+                        },
+                        log_prefix="Agent Executing",
+                    )
+                    messages.append(
+                        ToolMessage(
+                            tool_call_id=tool_call["id"],
+                            name=tool_call["name"],
+                            content=format_action_result(action_name, reason, result_str),
+                        )
+                    )
+
                 iteration += 1
             else:
-                print(f"Safety Break: Reached the maximum of {MAX_AGENT_STEPS} iterations.")
+                print(f"Safety Break: Reached the maximum of {args.max_steps} iterations.")
 
-    except Exception as e:
-        print(f"Execution failed: {e}")
+    except Exception as exc:
+        print(f"Execution failed: {exc}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

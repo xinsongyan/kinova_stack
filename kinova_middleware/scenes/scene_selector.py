@@ -31,6 +31,20 @@ def discover_scenes(scenes_dir: str | None = None) -> list[str]:
     return files
 
 
+def resolve_scene_number(scene_number: int, scenes_dir: str | None = None) -> str:
+    """Resolve a 1-based scene number to an absolute scene path."""
+    scenes = discover_scenes(scenes_dir)
+    if not scenes:
+        raise ValueError(f"No scene files found in {scenes_dir or DEFAULT_SCENES_DIR}.")
+
+    index = int(scene_number) - 1
+    if index < 0 or index >= len(scenes):
+        raise ValueError(
+            f"scene_number must be between 1 and {len(scenes)} (got {scene_number})."
+        )
+    return scenes[index]
+
+
 def select_scene(scenes_dir: str | None = None) -> str:
     """Pick a scene, either from ``KINOVA_SCENE`` env var or interactive menu.
 

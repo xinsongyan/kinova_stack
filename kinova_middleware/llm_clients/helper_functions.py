@@ -1,5 +1,8 @@
 import json
+import os
+import random
 import re
+import time
 
 from langchain_core.messages import ToolMessage
 
@@ -22,7 +25,7 @@ CHECK_STACKING_STATUS_TOOL = {
     },
 }
 
-GRAB_SHAPES_TARGETS = ("box", "sphere", "red_cylinder")
+GRAB_SHAPES_TARGETS = ("box", "sphere", "cylinder")
 
 VERIFY_OBJECT_LIFT_TOOL = {
     "type": "function",
@@ -34,7 +37,7 @@ VERIFY_OBJECT_LIFT_TOOL = {
             "properties": {
                 "body_name": {
                     "type": "string",
-                    "description": "The object name to verify, for example box, sphere, or red_cylinder.",
+                    "description": "The object name to verify, for example box, sphere, or cylinder.",
                 },
                 "min_height": {
                     "type": "number",
@@ -63,6 +66,66 @@ FINISH_TASK_TOOL = {
         },
     },
 }
+
+DEFAULT_LLM_RATE_LIMIT_RETRIES = 8
+DEFAULT_LLM_RATE_LIMIT_BASE_DELAY_S = 2.0
+DEFAULT_LLM_RATE_LIMIT_MAX_DELAY_S = 60.0
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_SCENES_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "scenes"))
+
+
+def discover_local_scene_names() -> list[str]:
+    """Return the locally available scene basenames in server selection order."""
+    if not os.path.isdir(_SCENES_DIR):
+        return []
+    return [
+        name
+        for name in sorted(os.listdir(_SCENES_DIR))
+        if name.endswith((".xml", ".mjcf"))
+    ]
+
+
+def resolve_local_scene_number(scene_name: str) -> int:
+    """Resolve a scene basename to the 1-based number used by reset_scene()."""
+    normalized_name = os.path.basename(scene_name)
+    scene_names = discover_local_scene_names()
+    if normalized_name not in scene_names:
+        raise ValueError(
+            f"Scene '{normalized_name}' was not found in {_SCENES_DIR}. "
+            f"Available scenes: {', '.join(scene_names) if scene_names else 'none'}."
+        )
+    return scene_names.index(normalized_name) + 1
+
+
+async def reset_scene_if_available(
+    mcp_client,
+    available_tool_names: set[str],
+    *,
+    scene_name: str | None = None,
+    scene_number: int | None = None,
+    run_number: int | None = None,
+    total_runs: int | None = None,
+) -> None:
+    """Reset or hot-swap the scene before an agent run when supported."""
+    if "reset_scene" not in available_tool_names:
+        print("Warning: reset_scene() is not available, so the scene will not auto-reset.")
+        return
+
+    selected_scene_number = scene_number
+    if selected_scene_number is None and scene_name is not None:
+        selected_scene_number = resolve_local_scene_number(scene_name)
+
+    tool_args = {}
+    if selected_scene_number is not None:
+        tool_args["scene_number"] = selected_scene_number
+
+    result = await mcp_client.call_tool("reset_scene", tool_args)
+    data = result.structured_content or {}
+    status = data.get("status", "unknown")
+    message = data.get("message", "No reset_scene message returned.")
+
+    prefix = f"[Run {run_number}] " if run_number is not None else ""
+    print(f"{prefix}reset_scene -> {status}: {message}")
 
 
 async def load_tools_and_prompts_from_mcp(mcp_client, extra_tools=None, skip_reset_scene=True):
@@ -131,7 +194,12 @@ async def load_tools_and_prompts_from_mcp(mcp_client, extra_tools=None, skip_res
         return []
 
 
-def bind_model_tools(llm, tools_schema: list[dict], tool_choice: str | None = "required"):
+def bind_model_tools(
+    llm,
+    tools_schema: list[dict],
+    tool_choice: str | None = "required",
+    parallel_tool_calls: bool | None = None,
+):
     """Bind tools to an LLM with a provider-compatible tool choice mode.
 
     The default `required` mode avoids OpenAI-compatible servers such as vLLM
@@ -147,8 +215,174 @@ def bind_model_tools(llm, tools_schema: list[dict], tool_choice: str | None = "r
     bind_kwargs = {}
     if normalized_tool_choice is not None:
         bind_kwargs["tool_choice"] = normalized_tool_choice
+    if parallel_tool_calls is not None:
+        bind_kwargs["parallel_tool_calls"] = parallel_tool_calls
 
     return llm.bind_tools([tool["function"] for tool in tools_schema], **bind_kwargs)
+
+
+def build_reasoned_action_tool(tools_schema: list[dict]) -> dict:
+    """Return a single wrapper tool that requires a reason for every action."""
+    action_names = [tool["function"]["name"] for tool in tools_schema]
+    return {
+        "type": "function",
+        "function": {
+            "name": "call_tool_with_reason",
+            "description": (
+                "Call exactly one action from the action reference. "
+                "You must provide a short reason, the exact tool name, and a JSON object of tool arguments."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "One short sentence explaining what you are about to do and why.",
+                    },
+                    "tool_name": {
+                        "type": "string",
+                        "enum": action_names,
+                        "description": "Exact action name from the action reference.",
+                    },
+                    "tool_args": {
+                        "type": "object",
+                        "description": "JSON object containing the arguments for tool_name. Use {} when there are no arguments.",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["reason", "tool_name", "tool_args"],
+            },
+        },
+    }
+
+
+def build_action_reference(tools_schema: list[dict]) -> str:
+    """Render the available actions and schemas as prompt text for the wrapper tool."""
+    lines = [
+        "Action reference:",
+        "Use only the action names and argument schemas listed below.",
+        "For each action, call `call_tool_with_reason` with `reason`, `tool_name`, and `tool_args`.",
+    ]
+    for tool in tools_schema:
+        fn = tool["function"]
+        params = json.dumps(fn.get("parameters", {}), ensure_ascii=True, separators=(",", ":"))
+        lines.append(f"- {fn['name']}: {fn.get('description', '')}")
+        lines.append(f"  parameters={params}")
+    return "\n".join(lines)
+
+
+def format_action_result(tool_name: str, reason: str, result_str: str) -> str:
+    """Return the wrapper-tool response content sent back to the model."""
+    return (
+        f"Reason: {reason}\n"
+        f"Executed action: {tool_name}\n"
+        f"Result:\n{result_str}"
+    )
+
+
+def _coerce_retry_after_seconds(value) -> float | None:
+    """Convert a Retry-After-like header value to seconds when possible."""
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        return seconds if seconds > 0 else None
+
+    if isinstance(value, str):
+        try:
+            seconds = float(value.strip())
+        except ValueError:
+            return None
+        return seconds if seconds > 0 else None
+
+    return None
+
+
+def _extract_retry_after_seconds(exc: Exception) -> float | None:
+    """Best-effort extraction of retry delay from provider exceptions."""
+    for attr_name in ("retry_after", "retry_after_seconds"):
+        retry_after = _coerce_retry_after_seconds(getattr(exc, attr_name, None))
+        if retry_after is not None:
+            return retry_after
+
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) if response is not None else None
+    if headers:
+        for header_name in (
+            "retry-after",
+            "Retry-After",
+            "x-ratelimit-reset-requests",
+            "x-ratelimit-reset-tokens",
+        ):
+            retry_after = _coerce_retry_after_seconds(headers.get(header_name))
+            if retry_after is not None:
+                return retry_after
+
+    return None
+
+
+def is_rate_limit_error(exc: Exception) -> bool:
+    """Return True when the exception looks like a provider-side rate limit."""
+    if getattr(exc, "status_code", None) == 429:
+        return True
+
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) == 429:
+        return True
+
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and body.get("status") == 429:
+        return True
+
+    message = str(exc).lower()
+    return (
+        "too many requests" in message
+        or "rate limit" in message
+        or "ratelimit" in message
+        or "error code: 429" in message
+        or "{'status': 429" in message
+    )
+
+
+def invoke_with_rate_limit_retry(
+    llm_with_tools,
+    messages,
+    *,
+    max_retries: int = DEFAULT_LLM_RATE_LIMIT_RETRIES,
+    base_delay_s: float = DEFAULT_LLM_RATE_LIMIT_BASE_DELAY_S,
+    max_delay_s: float = DEFAULT_LLM_RATE_LIMIT_MAX_DELAY_S,
+):
+    """Invoke the model, retrying the same step on provider 429 responses."""
+    retry_count = 0
+
+    while True:
+        try:
+            return llm_with_tools.invoke(messages)
+        except Exception as exc:
+            if not is_rate_limit_error(exc):
+                raise
+
+            if retry_count >= max_retries:
+                raise RuntimeError(
+                    f"LLM rate-limit retries exhausted after {max_retries} retries: {exc}"
+                ) from exc
+
+            retry_count += 1
+            retry_after_s = _extract_retry_after_seconds(exc)
+            if retry_after_s is None:
+                delay_s = min(max_delay_s, base_delay_s * (2 ** (retry_count - 1)))
+            else:
+                delay_s = min(max_delay_s, max(base_delay_s, retry_after_s))
+
+            jitter_s = min(1.0, delay_s * 0.1) * random.random()
+            wait_s = delay_s + jitter_s
+            print(
+                "   → Model API rate limited (429). "
+                f"Waiting {wait_s:.1f}s before retrying the same step "
+                f"[retry {retry_count}/{max_retries}]."
+            )
+            time.sleep(wait_s)
 
 
 async def handle_prompt_tool_call(mcp_client, func_name, args):
@@ -216,8 +450,6 @@ async def check_sorting_progress(mcp_client) -> str:
             summary += "\n\nWARNING: No actionable cubes found in their workspaces. Remaining cubes are misplaced."
         elif not actionable:
             summary += "\n\nMISSION STATUS: ALL CUBES SORTED SUCCESSFULLY."
-        else:
-            summary += f"\n\nNEXT ACTION: Begin sorting {len(actionable)} remaining cubes starting with '{actionable[0]}'."
 
         summary += "\n\nCRITICAL SAFETY RULE: Never attempt to pick a cube marked 'OUT OF WORKSPACE'. Focus only on cubes in their designated start zones."
         print(f"\n[check_sorting_status summary]:\n{summary}\n")
@@ -309,8 +541,9 @@ async def check_stacking_status(mcp_client) -> str:
 
 async def verify_object_lift(mcp_client, body_name: str, min_height: float = 0.12) -> str:
     """Check whether a named object has been lifted high enough above the table."""
+    canonical_body_name = str(body_name or "").strip()
     try:
-        result = await mcp_client.call_tool("get_object_pose", {"body_name": body_name})
+        result = await mcp_client.call_tool("get_object_pose", {"body_name": canonical_body_name})
         data = result.structured_content or {}
         if data.get("status") == "error":
             return f"LIFT CHECK ERROR: {data.get('message', 'Unknown error')}"
@@ -320,17 +553,18 @@ async def verify_object_lift(mcp_client, body_name: str, min_height: float = 0.1
         lifted = z >= min_height
 
         summary = (
-            f"LIFT STATUS for '{body_name}': z={z:.3f} m, threshold={min_height:.3f} m. "
+            f"LIFT STATUS for '{canonical_body_name}': z={z:.3f} m, threshold={min_height:.3f} m. "
             f"{'PASS: object is lifted high enough.' if lifted else 'FAIL: object is still too low.'}"
         )
         print(f"\n[verify_object_lift summary]:\n{summary}\n")
         return summary
     except Exception as e:
-        return f"LIFT CHECK ERROR for '{body_name}': {str(e)}"
+        return f"LIFT CHECK ERROR for '{canonical_body_name}': {str(e)}"
 
 
 def record_grab_verification(verification_history: dict, body_name: str, result: str, min_height: float) -> None:
     """Store the official outcome of a verify_object_lift tool call."""
+    canonical_body_name = str(body_name or "").strip()
     status = "error"
     passed = False
     z_height = None
@@ -355,7 +589,7 @@ def record_grab_verification(verification_history: dict, body_name: str, result:
         "min_height": float(min_height),
         "raw_result": result,
     }
-    history = verification_history.setdefault(body_name, {"attempts": []})
+    history = verification_history.setdefault(canonical_body_name, {"attempts": []})
     history["attempts"].append(event)
 
 
@@ -369,7 +603,9 @@ async def collect_grab_shapes_report(
     objects = []
     verified_count = 0
 
-    for body_name in targets:
+    normalized_targets = tuple(str(body_name or "").strip() for body_name in targets)
+
+    for body_name in normalized_targets:
         history = verification_history.get(body_name, {})
         attempts = history.get("attempts", [])
         successful_attempt = next((attempt for attempt in reversed(attempts) if attempt.get("passed")), None)
@@ -427,9 +663,9 @@ async def collect_grab_shapes_report(
 
     return {
         "workflow": "grab_shapes",
-        "targets": list(targets),
+        "targets": list(normalized_targets),
         "verified_count": verified_count,
-        "target_count": len(targets),
+        "target_count": len(normalized_targets),
         "objects": objects,
     }
 
@@ -489,20 +725,6 @@ def format_grab_shapes_report(report: dict) -> str:
     return "\n".join(lines)
 
 
-async def verify_lift(mcp_client, body_name):
-    """Backward-compatible wrapper returning `(lifted, z)`."""
-    try:
-        result = await mcp_client.call_tool("get_object_pose", {"body_name": body_name})
-        data = result.structured_content or {}
-        if data.get("status") == "error":
-            return False, 0.0
-        z = data.get("position", {}).get("z", 0.0)
-        return z > 0.12, z
-    except Exception as e:
-        print(f"Verification error: {e}")
-        return False, 0.0
-
-
 async def execute_mcp_tool(mcp_client, tool_name: str, args: dict, local_tool_handlers=None, log_prefix="Agent Executing") -> str:
     """Execute a local helper, prompt tool, or MCP tool and stringify the result."""
     print(f"\n{log_prefix}: {tool_name}({args})")
@@ -542,13 +764,110 @@ def _repair_tool_args_json(raw_args: str) -> str:
     return repaired.strip()
 
 
+def _strip_json_code_fence(content: str) -> str:
+    """Remove a surrounding Markdown code fence when the model wraps JSON in one."""
+    stripped = content.strip()
+    fenced = re.fullmatch(r"```(?:json)?\s*(.*?)```", stripped, re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    return stripped
+
+
+def _normalize_json_tool_call(entry: dict, iteration: int, index: int) -> dict:
+    """Convert a JSON-emitted tool call object into the internal tool-call format."""
+    function_block = entry.get("function")
+    if isinstance(function_block, dict):
+        tool_name = function_block.get("name")
+        raw_args = function_block.get("arguments", function_block.get("parameters", {}))
+    else:
+        tool_name = entry.get("name", entry.get("tool_name"))
+        raw_args = entry.get("args", entry.get("arguments", entry.get("parameters", {})))
+
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        raise ValueError("missing tool name")
+
+    if isinstance(raw_args, str):
+        cleaned_args = _repair_tool_args_json(raw_args)
+        raw_args = json.loads(cleaned_args) if cleaned_args else {}
+
+    if raw_args is None:
+        raw_args = {}
+    if not isinstance(raw_args, dict):
+        raise ValueError("tool arguments must be a JSON object")
+
+    return {
+        "name": tool_name.strip(),
+        "args": raw_args,
+        "id": str(entry.get("id") or f"fallback_{iteration}_{index}_{tool_name.strip()}"),
+    }
+
+
+def _parse_json_tool_calls(content: str, iteration: int) -> tuple[list[dict], list[ToolMessage]]:
+    """Parse raw JSON tool calls from providers that emit them in assistant content."""
+    tool_calls = []
+    tool_messages = []
+    candidate = _strip_json_code_fence(content)
+
+    if not candidate or candidate[0] not in "[{":
+        return tool_calls, tool_messages
+
+    try:
+        payload = json.loads(candidate)
+    except Exception:
+        return tool_calls, tool_messages
+
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return tool_calls, tool_messages
+
+    print("   [Fallback Parser] Found JSON tool call content. Extracting...")
+
+    for index, entry in enumerate(payload, start=1):
+        if not isinstance(entry, dict):
+            err_msg = (
+                "TOOL PARSE ERROR: JSON tool call payload must be an object or a list of objects. "
+                "Resend the next action as a valid structured tool call."
+            )
+            tool_messages.append(
+                ToolMessage(
+                    tool_call_id=f"err_{iteration}_json_tool_parse_{index}",
+                    name="tool_parse_error",
+                    content=json.dumps({"status": "error", "message": err_msg}),
+                )
+            )
+            continue
+
+        try:
+            tool_calls.append(_normalize_json_tool_call(entry, iteration, index))
+        except Exception as exc:
+            err_msg = (
+                f"JSON PARSE ERROR: Could not interpret tool call object #{index}: {exc}. "
+                "Include `name` plus `parameters`/`arguments` as a JSON object."
+            )
+            print(f"   [Fallback Parser] {err_msg}")
+            tool_messages.append(
+                ToolMessage(
+                    tool_call_id=f"err_{iteration}_json_tool_parse_{index}",
+                    name="tool_parse_error",
+                    content=json.dumps({"status": "error", "message": err_msg}),
+                )
+            )
+
+    return tool_calls, tool_messages
+
+
 def parse_raw_tool_calls(content: str, iteration: int) -> tuple[list[dict], list[ToolMessage]]:
-    """Fallback parser for models that emit raw tool tags instead of structured calls."""
+    """Fallback parser for models that emit raw tool tags or JSON instead of structured calls."""
     tool_calls = []
     tool_messages = []
 
     if not content:
         return tool_calls, tool_messages
+
+    json_tool_calls, json_tool_messages = _parse_json_tool_calls(content, iteration)
+    if json_tool_calls or json_tool_messages:
+        return json_tool_calls, json_tool_messages
 
     normalized_content = content.replace("｜", "|")
     if "<|tool▁call▁begin|>" not in normalized_content:

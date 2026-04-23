@@ -50,12 +50,16 @@ class SimEnv:
 
     def reset(self):
         mujoco.mj_resetData(self.model, self.data)
+        mujoco.mj_forward(self.model, self.data)
+        self.sync_viewer()
 
     def set_model_keyframe(self, name):
         keyframe = self.model.keyframe(name=name)
         if keyframe is None:
             raise ValueError(f"Keyframe '{name}' not found in the model.")
         mujoco.mj_resetDataKeyframe(self.model, self.data, keyframe.id)
+        mujoco.mj_forward(self.model, self.data)
+        self.sync_viewer()
 
 
     def get_state(self):

@@ -31,6 +31,7 @@ from helper_functions import (
     check_stacking_status,
     execute_mcp_tool,
     finish_task,
+    invoke_with_rate_limit_retry,
     load_tools_and_prompts_from_mcp,
     parse_raw_tool_calls,
     verify_object_lift,
@@ -124,7 +125,7 @@ async def main() -> None:
             iteration = 1
             while iteration <= MAX_AGENT_STEPS:
                 print(f"--- [Thinking - Step {iteration}] ---")
-                ai_msg = llm_with_tools.invoke(messages)
+                ai_msg = invoke_with_rate_limit_retry(llm_with_tools, messages)
                 if ai_msg.content:
                     print(ai_msg.content)
                 messages.append(ai_msg)

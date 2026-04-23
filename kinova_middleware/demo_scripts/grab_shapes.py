@@ -3,7 +3,7 @@
 Grab Shapes Demo — Explicitly grab different geometric primitives
 using the math tools provided by the MCP server.
 
-Targets: "box", "sphere", "red_cylinder" from the shapes.xml scene.
+Targets: "box", "sphere", "cylinder" from the shapes.xml scene.
 
 Usage:
     1. Start server:  mjpython kinova_middleware/backend/mcp_kinova_server.py
@@ -165,7 +165,7 @@ async def main():
         await grab_object(client, "sphere", drop_x=0.0, drop_y=0.2)
         
         # Grab Cylinder
-        await grab_object(client, "red_cylinder", drop_x=0.2, drop_y=-0.2)
+        await grab_object(client, "cylinder", drop_x=0.2, drop_y=-0.2)
         
         log("\n[Done] All shapes picked up!")
 

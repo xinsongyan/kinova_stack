@@ -53,20 +53,9 @@
           <body name="link_4" pos="0 0.1231 -0.0086" quat="0 0 -0.707107 0.707107">
             <inertial pos="0 0 -0.06" quat="0.5 0.5 -0.5 0.5" mass="0.78" diaginertia="0.000624 0.000370499 0.000370499"/>
             <joint name="joint_4" pos="0 0 0" axis="0 0 1" actuatorfrcrange="-20 20" damping="0.1"/>
-            <!-- EE reference point: green sphere + RGB rotation arrows -->
+            <!-- Hidden EE reference site retained for backend pose/IK lookup -->
             <site name="ee_marker" pos="0 0 -0.13" size="0.012"
-                  rgba="0.1 1.0 0.1 0.6" type="sphere"/>
-            <!-- X-axis (red) -->
-            <site name="ee_axis_x" pos="0.03 0 -0.13" size="0.003 0.03"
-                  rgba="1 0 0 0.8" type="cylinder"
-                  quat="0.707107 0 0.707107 0"/>
-            <!-- Y-axis (green) -->
-            <site name="ee_axis_y" pos="0 0.03 -0.13" size="0.003 0.03"
-                  rgba="0 1 0 0.8" type="cylinder"
-                  quat="0.707107 -0.707107 0 0"/>
-            <!-- Z-axis (blue) -->
-            <site name="ee_axis_z" pos="0 0 -0.10" size="0.003 0.03"
-                  rgba="0 0 1 0.8" type="cylinder"/>
+                  rgba="0 0 0 0" type="sphere"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="hand_2finger" material="black"/>
             <geom type="mesh" contype="0" conaffinity="0" group="1" density="0"  mesh="ring_small" material="grey"/>
             <geom type="mesh"  mesh="hand_2finger" material="black"/>

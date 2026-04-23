@@ -7,14 +7,14 @@ def setup_prompts(mcp: FastMCP):
     def grab_shapes() -> str:
         """Task prompt for grabbing and lifting the demo shapes."""
         return """You are a robotic arm control agent. You control a 4-DOF Kinova Gen3 arm with a 2-finger gripper.
-Your mission is to sequentially pick up three objects in the scene: "box", "sphere", and "red_cylinder".
+Your mission is to sequentially pick up three objects in the scene: "box", "sphere", and "cylinder".
 
 STANDARD OPERATING PROCEDURE FOR EACH OBJECT:
 1. **Home & Prepare**: Call `move_home()`. Call `set_gripper(percent=1.0)` to open fingers.
 2. **Locate Object**: Call `get_object_pose(body_name='<target>')`. Read its position, size, geom_type, and quaternion.
    - For box, geom_type="box".
    - For sphere, geom_type="sphere".
-   - For red_cylinder, geom_type="cylinder".
+   - For cylinder, geom_type="cylinder".
 3. **Compute Top Height**: Call `compute_grasp_height` using the object's geom_type, size, and quaternion to find `top_height`, the physical top boundary.
 4. **Approach**: Call `move_pose` to the object's x,y, and Z = top_height + 0.15. Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
 5. **Align Wrist**:
@@ -23,7 +23,7 @@ STANDARD OPERATING PROCEDURE FOR EACH OBJECT:
      c. If box: the result angle might need modulus math to snap to a 90-degree face. Usually just apply the raw angle unless it's way off. (Hint: angle_deg = ((angle_deg + 45.0) % 90.0) - 45.0)
      d. Call `rotate_wrist(angle_deg)` with the final alignment angle.
 6. **Descend**:
-   Call `move_pose` to the object's x,y, and Z = top_height + 0.01.
+   Call `move_pose` to the object's x,y, and Z = top_height.
    Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
 7. **Grasp**:
    Call `set_gripper(percent=...)`:
@@ -35,11 +35,14 @@ STANDARD OPERATING PROCEDURE FOR EACH OBJECT:
 9. **Verify Lift**: If the local client tool `verify_object_lift(body_name='<target>')` is available, call it after the lift and use it to confirm the object is high enough before moving on.
 10. **Drop the object**: Call `set_gripper(percent=1.0)` to release the object.
 
-Once you receive confirmation for all three objects (box, sphere, red_cylinder), state "All tasks complete."
+Once you receive confirmation for all three objects (box, sphere, cylinder), state "All tasks complete."
 
 Output policy:
 - Prefer tool calls over chat.
 - Execute steps sequentially and rely on tool outputs rather than guessing values.
+- Before every tool call, first say one short sentence explaining what you are about to do and why.
+- Example: "I am going to get the position of the cylinder so I can plan the grasp."
+- After that one sentence, immediately make the tool call.
 - there is a z limit at 0.07 do not set the arm to go lower than this
 """
 
@@ -60,7 +63,8 @@ Mission objective:
 1. Use `check_sorting_status()` to identify the status of all cubes.
 2. For each cube marked as "At Starting Position":
    a. Identify its color and target bin.
-   b. Execute a precise 7-step pick-and-place sequence (see below).
+   b. Execute the required pick sequence.
+   c. Then place it into the correct bin using the bin target site directly above that bin.
 3. Finish when `check_sorting_status()` reports "MISSION STATUS: ALL CUBES SORTED SUCCESSFULLY".
 
 Detailed 7-Step Pick Sequence (REQUIRED):
@@ -71,6 +75,15 @@ Detailed 7-Step Pick Sequence (REQUIRED):
 5. `move_pose` to `[x, y, top_height + 0.015]` with `target_quat=[0,0,0,0]` (Descend).
 6. `set_gripper(percent=0.54)` (Grasp).
 7. `move_pose` to `[x, y, top_height + 0.20]` with `move_wrist=False` (Lift).
+
+Required Bin Placement Sequence:
+1. Determine the correct target site from the cube color:
+   - red cube -> `red_bin_target`
+   - blue cube -> `blue_bin_target`
+2. Call `get_object_pose(body_name='<bin_target_site>')` to read the exact site pose.
+3. Call `move_pose` to the exact `[target_x, target_y, target_z]` of that site.
+4. Call `set_gripper(percent=1.0)` to release the cube into the bin.
+5. Retreat upward safely before moving to the next cube.
 
 Safety and execution rules:
 - NEVER attempt to pick up any cube marked as "OUT OF WORKSPACE".
@@ -188,7 +201,7 @@ STANDARD OPERATING PROCEDURE FOR ANY OBJECT:
 2. **Locate Object**: Call `get_object_pose(body_name='<target>')`. Read its position, size, geom_type, and quaternion.
    - For box, geom_type="box". 
    - For sphere, geom_type="sphere". 
-   - For red_cylinder, geom_type="cylinder".
+   - For cylinder, geom_type="cylinder".
 3. **Compute Top Height**: Call `compute_grasp_height` using the object's geom_type, size, and quaternion to find `top_height`, the physical top boundary.
 4. **Approach**: Call `move_pose` to the object's x,y, and Z = top_height + 0.15. Use `target_quat=[0.0, 0.0, 0.0, 0.0]`.
 5. **Align Wrist**:

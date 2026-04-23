@@ -48,7 +48,7 @@ import sys as _sys
 _scenes_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "scenes"))
 if _scenes_dir not in _sys.path:
     _sys.path.insert(0, _scenes_dir)
-from scene_selector import select_scene  # noqa: E402
+from scene_selector import resolve_scene_number, select_scene  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Configuration from environment
@@ -71,6 +71,7 @@ logging.basicConfig(
 # Controller singleton  (initialised in _startup, used by every tool)
 # ---------------------------------------------------------------------------
 _controller: KinovaController | None = None
+_current_scene_path: str | None = None
 
 # Only one motion command may run at a time.
 _motion_lock = threading.Lock()
@@ -92,6 +93,98 @@ def _get_controller() -> KinovaController:
     if _controller is None:
         raise RuntimeError("Controller not initialised – server not started?")
     return _controller
+
+
+def _build_controller_for_scene(scene_path: str) -> KinovaController:
+    """Create and initialise a controller for the requested scene."""
+    log.info(
+        "Initialising Kinova controller  mode=%s  speed=%.2f rad/s",
+        KINOVA_MODE,
+        TARGET_SPEED,
+    )
+
+    if KINOVA_MODE == "sim":
+        backend = KinovaMuJoCoBackend(
+            model_path=scene_path,
+            viewer=True,
+            target_speed_rad_s=TARGET_SPEED,
+            ee_site="ee_marker",
+        )
+    elif KINOVA_MODE == "real":
+        from kinova_sdk_backend import KinovaSDKBackend
+
+        backend = KinovaSDKBackend()
+    else:
+        raise ValueError(f"KINOVA_MODE must be 'sim' or 'real', got '{KINOVA_MODE}'")
+
+    controller = KinovaController(backend)
+    controller.init()
+    log.info("Controller ready.  DOF=%d  arm_dof=%d", controller.dof, controller.arm_dof)
+    return controller
+
+
+def _move_home_after_init() -> None:
+    """Move the freshly initialised controller to its home configuration."""
+    ctrl = _get_controller()
+    log.info("Moving home …")
+    ctrl.move_home()
+    _run_until_reached(timeout_s=10.0, hold_seconds=HOLD_SECONDS)
+    log.info("Home reached. Simulation frozen.")
+
+
+def _reset_or_reload_scene(scene_number: int | None = None) -> dict[str, Any]:
+    """Reset the current scene or hot-swap to another scene in sim mode."""
+    global _controller, _current_scene_path
+
+    if scene_number is None:
+        ctrl = _get_controller()
+        with _physics_lock:
+            ctrl.reset_scene()
+        scene_path = _current_scene_path
+        return {
+            "status": "ok",
+            "message": "Scene reset successfully.",
+            "scene_changed": False,
+            "scene_name": os.path.basename(scene_path) if scene_path else None,
+            "scene_path": scene_path,
+        }
+
+    resolved_scene_path = resolve_scene_number(scene_number)
+    scene_name = os.path.basename(resolved_scene_path)
+
+    if KINOVA_MODE != "sim":
+        raise RuntimeError("Scene switching by number is only supported in sim mode.")
+
+    if _current_scene_path == resolved_scene_path and _controller is not None:
+        with _physics_lock:
+            _controller.reset_scene()
+        return {
+            "status": "ok",
+            "message": f"Scene reset successfully: {scene_name}.",
+            "scene_changed": False,
+            "scene_number": int(scene_number),
+            "scene_name": scene_name,
+            "scene_path": resolved_scene_path,
+        }
+
+    log.info("Switching scene to #%d: %s", int(scene_number), scene_name)
+    with _physics_lock:
+        if _controller is not None:
+            _controller.close()
+            _controller = None
+
+        _controller = _build_controller_for_scene(resolved_scene_path)
+        _current_scene_path = resolved_scene_path
+
+    _move_home_after_init()
+    return {
+        "status": "ok",
+        "message": f"Scene switched and reset successfully: {scene_name}.",
+        "scene_changed": True,
+        "scene_number": int(scene_number),
+        "scene_name": scene_name,
+        "scene_path": resolved_scene_path,
+    }
 
 
 def _run_until_reached(
@@ -224,45 +317,24 @@ def _quat_rotation_error(
 # ---------------------------------------------------------------------------
 
 def _startup() -> None:
-    global _controller
+    global _controller, _current_scene_path
 
     # ── Scene selection (must happen before backend creation) ─────────
     scene_path = select_scene()
+    _current_scene_path = scene_path
     log.info("Selected scene: %s", os.path.basename(scene_path))
-
-    log.info("Initialising Kinova controller  mode=%s  speed=%.2f rad/s", KINOVA_MODE, TARGET_SPEED)
-
-    if KINOVA_MODE == "sim":
-        backend = KinovaMuJoCoBackend(
-            model_path=scene_path,
-            viewer=True,
-            target_speed_rad_s=TARGET_SPEED,
-            ee_site="ee_marker",
-        )
-    elif KINOVA_MODE == "real":
-        from kinova_sdk_backend import KinovaSDKBackend
-        backend = KinovaSDKBackend()
-    else:
-        raise ValueError(f"KINOVA_MODE must be 'sim' or 'real', got '{KINOVA_MODE}'")
-
-    _controller = KinovaController(backend)
-    _controller.init()
-    log.info("Controller ready.  DOF=%d  arm_dof=%d", _controller.dof, _controller.arm_dof)
-
-    # Move home and wait for it
-    log.info("Moving home …")
-    _controller.move_home()
-    _run_until_reached(timeout_s=10.0, hold_seconds=HOLD_SECONDS)
-    log.info("Home reached. Simulation frozen.")
+    _controller = _build_controller_for_scene(scene_path)
+    _move_home_after_init()
 
 
 def _shutdown() -> None:
-    global _controller
+    global _controller, _current_scene_path
     log.info("Shutting down …")
     _stepper_running.clear()
     if _controller is not None:
         _controller.close()
         _controller = None
+    _current_scene_path = None
     log.info("Controller closed.")
 
 
@@ -288,6 +360,7 @@ setup_tools(mcp, {
     "motion_lock": _motion_lock,
     "physics_lock": _physics_lock,
     "run_until_reached": _run_until_reached,
+    "reset_or_reload_scene": _reset_or_reload_scene,
 })
 
 setup_prompts(mcp)

@@ -6,6 +6,9 @@ from fastmcp import FastMCP
 
 log = logging.getLogger("mcp_kinova")
 
+WORKSPACE_MIN_RADIUS_M = 0.10
+WORKSPACE_MAX_RADIUS_M = 0.50
+
 def _coerce_to_float_list(value: Any, name: str) -> list[float]:
     """Coerce incoming value to a list of floats.
 
@@ -40,12 +43,30 @@ def _coerce_to_float_list(value: Any, name: str) -> list[float]:
 
     raise ValueError(f"{name} must be a list or string-encoded list; got {type(value).__name__}")
 
+def _validate_workspace_target(target_pos: list[float]) -> None:
+    """Reject Cartesian targets outside the annular XY workspace."""
+    if len(target_pos) != 3:
+        raise ValueError("target_pos must have 3 elements.")
+
+    if not all(math.isfinite(v) for v in target_pos):
+        raise ValueError("target_pos must contain only finite numeric values.")
+
+    radius = math.hypot(target_pos[0], target_pos[1])
+    if radius < WORKSPACE_MIN_RADIUS_M or radius > WORKSPACE_MAX_RADIUS_M:
+        raise ValueError(
+            "target_pos is outside the workspace: "
+            f"xy radius={radius:.3f} m, allowed range="
+            f"[{WORKSPACE_MIN_RADIUS_M:.2f}, {WORKSPACE_MAX_RADIUS_M:.2f}] m."
+        )
+
+
 def setup_tools(mcp: FastMCP, state: dict):
     """Register Kinova tools with the MCP server."""
     get_controller = state["get_controller"]
     motion_lock = state["motion_lock"]
     physics_lock = state["physics_lock"]
     run_until_reached = state["run_until_reached"]
+    reset_or_reload_scene = state.get("reset_or_reload_scene")
 
     def _quat_rotate(q: list[float], v: list[float]) -> list[float]:
         """Rotate vector v by quaternion q = (qx, qy, qz, qw) using q * v * q^-1."""
@@ -71,26 +92,48 @@ def setup_tools(mcp: FastMCP, state: dict):
 
     # ── Tool 0: reset_scene ──────────────────────────────────────────────────
     @mcp.tool()
-    def reset_scene() -> dict:
-        """Reset the simulation physics, returning the environment to its initial state.
+    def reset_scene(scene_number: int | str | None = None) -> dict:
+        """Reset the current scene or switch to another scene by number.
+
+        Args:
+            scene_number: optional 1-based scene selector. When omitted, reset
+                the currently loaded scene. When provided in sim mode, switch to
+                that scene and then reset it.
 
         Returns:
             status: "ok" or "error"
             message: human-readable result
         """
-        log.info("Tool  reset_scene()")
-        ctrl = get_controller()
+        log.info("Tool  reset_scene(scene_number=%r)", scene_number)
+        parsed_scene_number: int | None = None
+        if scene_number is not None:
+            try:
+                parsed_scene_number = int(scene_number)
+            except (TypeError, ValueError) as exc:
+                return {
+                    "status": "error",
+                    "message": f"scene_number must be an integer when provided ({exc}).",
+                }
 
         with motion_lock:
-            with physics_lock:
-                try:
-                    ctrl.reset_scene()
-                except Exception as e:
-                    log.error("reset_scene failed: %s", e)
-                    return {"status": "error", "message": f"Reset failed: {e}"}
+            try:
+                if reset_or_reload_scene is not None:
+                    result = reset_or_reload_scene(parsed_scene_number)
+                else:
+                    with physics_lock:
+                        ctrl = get_controller()
+                        ctrl.reset_scene()
+                        result = {
+                            "status": "ok",
+                            "message": "Scene reset successfully.",
+                            "scene_changed": False,
+                        }
+            except Exception as e:
+                log.error("reset_scene failed: %s", e)
+                return {"status": "error", "message": f"Reset failed: {e}"}
 
-        log.info("  → Scene reset successfully.")
-        return {"status": "ok", "message": "Scene reset successfully."}
+        log.info("  → %s", result.get("message", "Scene reset successfully."))
+        return result
 
     # ── Tool 1: move_home ──────────────────────────────────────────────────────
     @mcp.tool()
@@ -235,6 +278,10 @@ def setup_tools(mcp: FastMCP, state: dict):
             return {"status": "error", "message": "target_pos must have 3 elements."}
         if len(target_quat) != 4:
             return {"status": "error", "message": "target_quat must have 4 elements."}
+        try:
+            _validate_workspace_target(target_pos)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
 
         quat_norm = math.sqrt(sum(v * v for v in target_quat))
         mode_used = "full_pose"
@@ -498,7 +545,7 @@ def setup_tools(mcp: FastMCP, state: dict):
                 return {"status": "error", "message": "Sphere size must be [radius]", "top_height": 0.0}
             top_z = float(size_list[0])
 
-        return {"status": "ok", "top_height": round(top_z + 0.03, 4)}
+        return {"status": "ok", "top_height": round(top_z + 0.04, 4)}
 
     @mcp.tool()
     def compute_wrist_alignment(obj_quat_xyzw: list[float] | str, ee_quat_xyzw: list[float] | str) -> dict:

@@ -15,6 +15,7 @@ Examples:
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
@@ -27,22 +28,28 @@ from helper_functions import (
     FINISH_TASK_TOOL,
     VERIFY_OBJECT_LIFT_TOOL,
     bind_model_tools,
+    build_action_reference,
+    build_reasoned_action_tool,
     build_retry_tool_message,
     collect_grab_shapes_report,
     execute_mcp_tool,
     finish_task,
+    format_action_result,
     format_grab_shapes_report,
+    invoke_with_rate_limit_retry,
     load_tools_and_prompts_from_mcp,
     parse_raw_tool_calls,
     record_grab_verification,
+    reset_scene_if_available,
     verify_object_lift,
 )
 
 
-DEFAULT_MODEL_NAME = "google/gemma-3-27b-it"
+DEFAULT_MODEL_NAME = "moonshotai/kimi-k2-instruct-0905"
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_SERVER_URL = "http://127.0.0.1:8000/mcp"
-DEFAULT_TASK = "Grab and lift the box, sphere, and red_cylinder. Start with the red_cylinder."
+DEFAULT_SCENE_NAME = "shapes.xml"
+DEFAULT_TASK = "Grab and lift the cylinder, box, sphere. start by picking up the cylinder. then pick up and drop the box then pick up the sphere."
 MAX_AGENT_STEPS = 50
 
 SYSTEM_PROMPT = """
@@ -64,9 +71,19 @@ Routing rules:
 5. If the user's request is ambiguous between workflows, ask one short clarification question instead of guessing.
 
 Tool rules:
-- Use only tools present in the tool schema.
+- Use only tools present in the action reference.
 - Never invent `pick_cube`, `place_cube`, or any other missing helper tools.
-- Prefer structured tool calling over plain chat.
+- Use the single structured wrapper tool `call_tool_with_reason` for every action.
+- For every action, provide:
+  - `reason`: one short sentence explaining what you are about to do and why
+  - `tool_name`: the exact action name from the action reference
+  - `tool_args`: a JSON object containing the arguments for that action
+- Example:
+  - `reason`: "I am going to get the position of the cylinder so I can plan the grasp."
+  - `tool_name`: `get_object_pose`
+  - `tool_args`: `{"body_name": "cylinder"}`
+- Exactly one `call_tool_with_reason` call is allowed per assistant turn.
+- Do not bundle multiple actions into one response. Wait for the tool result before deciding the next action.
 - Do not call more than one task prompt unless the user changes the task.
 - Keep execution sequential and grounded in tool outputs.
 
@@ -80,20 +97,6 @@ Completion rules for `grab_shapes`:
 def build_local_tools() -> list[dict]:
     """Return client-only helper tools for the grab_shapes workflow."""
     return [VERIFY_OBJECT_LIFT_TOOL, FINISH_TASK_TOOL]
-
-
-async def reset_scene_if_available(mcp_client, available_tool_names: set[str], run_number: int, total_runs: int) -> None:
-    """Reset the scene before a run when the MCP server exposes reset_scene()."""
-    if "reset_scene" not in available_tool_names:
-        if total_runs > 1:
-            print("Warning: reset_scene() is not available, so repeated runs will not auto-reset the scene.")
-        return
-
-    result = await mcp_client.call_tool("reset_scene", {})
-    data = result.structured_content or {}
-    status = data.get("status", "unknown")
-    message = data.get("message", "No reset_scene message returned.")
-    print(f"[Run {run_number}] reset_scene -> {status}: {message}")
 
 
 async def run_single_benchmark(
@@ -111,9 +114,16 @@ async def run_single_benchmark(
         extra_tools=build_local_tools(),
         skip_reset_scene=True,
     )
-    llm_with_tools = bind_model_tools(llm, tools_schema, tool_choice=tool_choice)
+    action_reference = build_action_reference(tools_schema)
+    llm_with_tools = bind_model_tools(
+        llm,
+        [build_reasoned_action_tool(tools_schema)],
+        tool_choice=tool_choice,
+        parallel_tool_calls=False,
+    )
     messages = [
         SystemMessage(content=SYSTEM_PROMPT),
+        SystemMessage(content=action_reference),
         HumanMessage(content=task),
     ]
     model_summary = "Task stopped before finish_task was called."
@@ -128,7 +138,7 @@ async def run_single_benchmark(
 
     for iteration in range(1, max_steps + 1):
         print(f"--- [Thinking - Step {iteration}] ---")
-        ai_msg = llm_with_tools.invoke(messages)
+        ai_msg = invoke_with_rate_limit_retry(llm_with_tools, messages)
         if ai_msg.content:
             print(ai_msg.content)
         messages.append(ai_msg)
@@ -150,19 +160,65 @@ async def run_single_benchmark(
             )
             continue
 
+        actionable_tool_calls = [tool_call for tool_call in tool_calls if "dummy" not in tool_call]
+        if len(actionable_tool_calls) > 1:
+            print("   → Warning: model returned multiple actions in one step; executing only the first.")
+            for extra_tool_call in actionable_tool_calls[1:]:
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=extra_tool_call["id"],
+                        name=extra_tool_call["name"],
+                        content=json.dumps(
+                            {
+                                "status": "error",
+                                "message": (
+                                    "Only one `call_tool_with_reason` action is allowed per assistant turn. "
+                                    "This extra action was ignored. Wait for the next step before issuing another action."
+                                ),
+                            }
+                        ),
+                    )
+                )
+            tool_calls = [actionable_tool_calls[0]]
+
         for tool_call in tool_calls:
             if "dummy" in tool_call:
                 continue
 
-            if tool_call["name"] == "finish_task":
-                model_summary = tool_call["args"].get("summary", "Task finished.")
+            reason = str(tool_call["args"].get("reason", "")).strip()
+            action_name = str(tool_call["args"].get("tool_name", "")).strip()
+            action_args = tool_call["args"].get("tool_args", {})
+
+            if not reason or not action_name or not isinstance(action_args, dict):
+                result_str = json.dumps(
+                    {
+                        "status": "error",
+                        "message": (
+                            "You must call `call_tool_with_reason` with non-empty `reason`, "
+                            "valid `tool_name`, and object-valued `tool_args`."
+                        ),
+                    }
+                )
+                messages.append(
+                    ToolMessage(
+                        tool_call_id=tool_call["id"],
+                        name=tool_call["name"],
+                        content=result_str,
+                    )
+                )
+                continue
+
+            print(f"   → Reason: {reason}")
+
+            if action_name == "finish_task":
+                model_summary = action_args.get("summary", "Task finished.")
                 stop_reason = "finish_task"
                 result_str = await finish_task(mcp_client, model_summary)
                 messages.append(
                     ToolMessage(
                         tool_call_id=tool_call["id"],
                         name=tool_call["name"],
-                        content=result_str,
+                        content=format_action_result(action_name, reason, result_str),
                     )
                 )
                 official_data = await collect_grab_shapes_report(
@@ -179,8 +235,8 @@ async def run_single_benchmark(
 
             result_str = await execute_mcp_tool(
                 mcp_client,
-                tool_call["name"],
-                tool_call["args"],
+                action_name,
+                action_args,
                 local_tool_handlers={
                     "verify_object_lift": tracked_verify,
                 },
@@ -190,7 +246,7 @@ async def run_single_benchmark(
                 ToolMessage(
                     tool_call_id=tool_call["id"],
                     name=tool_call["name"],
-                    content=result_str,
+                    content=format_action_result(action_name, reason, result_str),
                 )
             )
 
@@ -215,6 +271,12 @@ async def main() -> None:
     parser.add_argument("--server-url", default=DEFAULT_SERVER_URL, help="FastMCP server URL.")
     parser.add_argument("--runs", type=int, default=1, help="Number of fresh runs to execute.")
     parser.add_argument("--max-steps", type=int, default=MAX_AGENT_STEPS, help="Maximum agent iterations per run.")
+    parser.add_argument(
+        "--scene-number",
+        type=int,
+        default=None,
+        help=f"Optional 1-based scene number to load before each run. Defaults to {DEFAULT_SCENE_NAME}.",
+    )
     parser.add_argument(
         "--tool-choice",
         default="required",
@@ -259,7 +321,14 @@ async def main() -> None:
                 print("=" * 72)
                 print(f"Run {run_number}/{args.runs} | model={args.model} | tool_choice={args.tool_choice}")
                 print("=" * 72)
-                await reset_scene_if_available(mcp_client, available_tool_names, run_number, args.runs)
+                await reset_scene_if_available(
+                    mcp_client,
+                    available_tool_names,
+                    scene_name=DEFAULT_SCENE_NAME,
+                    scene_number=args.scene_number,
+                    run_number=run_number,
+                    total_runs=args.runs,
+                )
 
                 started_at = time.perf_counter()
                 result = await run_single_benchmark(
