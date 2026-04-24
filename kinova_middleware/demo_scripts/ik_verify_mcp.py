@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """IK verification via the MCP server.
 
-Connects to the running mcp_kinova_server, discovers all target_* sites,
+Connects to the running MCP server, discovers all target_* sites,
 moves the arm to each one, and reports position errors.
 
 Usage:  python ik_verify_mcp.py

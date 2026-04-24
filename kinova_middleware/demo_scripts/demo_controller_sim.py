@@ -18,7 +18,7 @@ def euler_xyz_to_quaternion(theta_x: float, theta_y: float, theta_z: float) -> t
     qz = cx * cy * sz - sx * sy * cz
     return (qx, qy, qz, qw)
 
-from backend.kinova_controller import KinovaController  # noqa: E402
+from backend.controller import KinovaController  # noqa: E402
 from backend.kinova_mujoco_backend import KinovaMuJoCoBackend  # noqa: E402
 
 # ----------------------------

@@ -2,9 +2,8 @@
 
 __all__ = [
     "app",
-    "prompts",
+    "server",
     "services",
     "tool_registry",
-    "tools",
     "toolsets",
 ]

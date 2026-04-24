@@ -6,20 +6,20 @@ from typing import Any, Awaitable, Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from kinova_middleware.llm_clients.rate_limits import invoke_with_rate_limit_retry
-from kinova_middleware.llm_clients.tool_dispatch import (
+from kinova_middleware.llm_clients.mcp.tool_dispatch import (
     build_retry_tool_message,
     execute_mcp_tool,
     finish_task,
     parse_raw_tool_calls,
 )
-from kinova_middleware.llm_clients.tool_schema import (
+from kinova_middleware.llm_clients.mcp.tool_schema import (
     bind_model_tools,
     build_action_reference,
     build_reasoned_action_tool,
     format_action_result,
     load_tools_and_prompts_from_mcp,
 )
+from kinova_middleware.llm_clients.runtime.rate_limits import invoke_with_rate_limit_retry
 
 
 LocalToolHandler = Callable[[Any, dict], Awaitable[str]]

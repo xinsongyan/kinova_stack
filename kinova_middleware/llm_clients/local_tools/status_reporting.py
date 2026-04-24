@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from kinova_middleware.llm_clients.tool_defs import GRAB_SHAPES_TARGETS
+from kinova_middleware.llm_clients.local_tools.tool_defs import GRAB_SHAPES_TARGETS
 
 
 async def check_sorting_progress(mcp_client) -> str:

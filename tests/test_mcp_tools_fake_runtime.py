@@ -10,7 +10,7 @@ from kinova_middleware.backend.mcp_server.services import (
     TaskPlanningToolService,
     ToolRuntimeContext,
 )
-from kinova_middleware.backend.mcp_server.tools import setup_tools
+from kinova_middleware.backend.mcp_server.tool_registry import setup_tools
 
 
 class FakeMCP:

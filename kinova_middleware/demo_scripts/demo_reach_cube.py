@@ -6,7 +6,7 @@ Connects to the MCP Kinova server, queries the cube's position,
 then commands the arm to reach that position using position-only IK.
 
 Usage:
-    1. Start server:  .venv/bin/mjpython kinova_middleware/backend/mcp_kinova_server.py
+    1. Start server:  .venv/bin/mjpython kinova_middleware/backend/mcp_server/app.py
     2. Run demo:      python kinova_middleware/demo_reach_cube.py
 """
 import asyncio

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from kinova_middleware.backend.interfaces.capabilities import BackendCapability
-from kinova_middleware.backend.mcp_server.prompts import setup_prompts
+from kinova_middleware.backend.mcp_server.toolsets.task_prompts import setup_prompts
 
 
 class FakeMCP:

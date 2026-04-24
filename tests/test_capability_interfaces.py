@@ -13,7 +13,7 @@ from kinova_middleware.backend.interfaces import (
     supports_capability,
 )
 from kinova_middleware.backend.kinova_backend import KinovaBackend, SafetyWrapperBackend
-from kinova_middleware.backend.kinova_controller import KinovaController
+from kinova_middleware.backend.controller import KinovaController
 
 
 class MinimalBackend(KinovaBackend):

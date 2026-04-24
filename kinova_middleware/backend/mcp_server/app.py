@@ -12,14 +12,14 @@ if __package__ in (None, ""):
 
 
 def main() -> None:
-    from kinova_middleware.backend.mcp_kinova_server import main as server_main
+    from kinova_middleware.backend.mcp_server.server import main as server_main
 
     server_main()
 
 
 def __getattr__(name: str):
     if name == "mcp":
-        from kinova_middleware.backend.mcp_kinova_server import mcp
+        from kinova_middleware.backend.mcp_server.server import mcp
 
         return mcp
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

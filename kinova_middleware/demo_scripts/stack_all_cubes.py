@@ -8,7 +8,7 @@ and stacks them into a neat vertical tower at a chosen destination.
 Uses only MCP server tools — no internal helper functions.
 
 Usage:
-    1. Start server:  mjpython kinova_middleware/backend/mcp_kinova_server.py
+    1. Start server:  mjpython kinova_middleware/backend/mcp_server/app.py
     2. Run stacker:   python kinova_middleware/stack_all_cubes.py
 """
 from __future__ import annotations

@@ -6,7 +6,7 @@ using the math tools provided by the MCP server.
 Targets: "box", "sphere", "cylinder" from the shapes.xml scene.
 
 Usage:
-    1. Start server:  mjpython kinova_middleware/backend/mcp_kinova_server.py
+    1. Start server:  mjpython kinova_middleware/backend/mcp_server/app.py
     (make sure to select shapes.xml scene)
     2. Run script:    python kinova_middleware/grab_shapes.py
 """

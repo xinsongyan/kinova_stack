@@ -5,11 +5,11 @@ import unittest
 
 from langchain_core.messages import AIMessage
 
-from kinova_middleware.llm_clients.tool_defs import (
+from kinova_middleware.llm_clients.local_tools.tool_defs import (
     CHECK_SORTING_STATUS_TOOL,
     FINISH_TASK_TOOL,
 )
-from kinova_middleware.llm_clients.workflow_runner import (
+from kinova_middleware.llm_clients.runtime.workflow_runner import (
     build_reasoned_agent_session,
     run_reasoned_agent_loop,
 )

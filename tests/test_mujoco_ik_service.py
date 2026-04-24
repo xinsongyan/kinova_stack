@@ -19,9 +19,9 @@ class MuJoCoIKServiceTests(unittest.TestCase):
 
         import numpy as np
 
-        from kinova_middleware.backend.mujoco_config import DEFAULT_KINOVA_MUJOCO_CONFIG
+        from kinova_middleware.backend.config.kinova_gen3_lite import DEFAULT_KINOVA_MUJOCO_CONFIG
         from kinova_middleware.backend.mujoco_ik import MuJoCoIKService
-        from kinova_middleware.backend.mujoco_runtime import MuJoCoRuntimeAdapter
+        from kinova_middleware.backend.runtime.mujoco_runtime import MuJoCoRuntimeAdapter
 
         runtime = MuJoCoRuntimeAdapter(
             model_path=DEFAULT_KINOVA_MUJOCO_CONFIG.model_path,

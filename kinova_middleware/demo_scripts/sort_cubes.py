@@ -8,7 +8,7 @@ and sorts them into the corresponding bins (red into red bin, blue into blue bin
 Uses only MCP server tools — no internal helper functions.
 
 Usage:
-    1. Start server:  KINOVA_SCENE=sorting_task.xml mjpython kinova_middleware/backend/mcp_kinova_server.py
+    1. Start server:  KINOVA_SCENE=sorting_task.xml mjpython kinova_middleware/backend/mcp_server/app.py
     2. Run sorter:    python kinova_middleware/sort_cubes.py
 """
 from __future__ import annotations
