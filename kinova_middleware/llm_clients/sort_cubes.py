@@ -13,29 +13,26 @@ Examples:
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 
+if __package__ in (None, ""):
+    _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+
 from fastmcp import Client
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from helper_functions import (
+from kinova_middleware.llm_clients.scene_tools import reset_scene_if_available
+from kinova_middleware.llm_clients.status_reporting import check_sorting_progress
+from kinova_middleware.llm_clients.tool_defs import (
     CHECK_SORTING_STATUS_TOOL,
     FINISH_TASK_TOOL,
-    bind_model_tools,
-    build_action_reference,
-    build_reasoned_action_tool,
-    build_retry_tool_message,
-    check_sorting_progress,
-    execute_mcp_tool,
-    finish_task,
-    format_action_result,
-    invoke_with_rate_limit_retry,
-    load_tools_and_prompts_from_mcp,
-    parse_raw_tool_calls,
-    reset_scene_if_available,
+)
+from kinova_middleware.llm_clients.workflow_runner import (
+    build_reasoned_agent_session,
+    run_reasoned_agent_loop,
 )
 
 
@@ -143,133 +140,37 @@ async def main() -> None:
                 total_runs=1,
             )
             print("Fetching server capabilities...")
-            tools_schema = await load_tools_and_prompts_from_mcp(
+            session = await build_reasoned_agent_session(
                 mcp_client,
+                llm,
+                system_prompt=SYSTEM_PROMPT,
+                task=args.task,
                 extra_tools=build_local_tools(),
+                tool_choice=args.tool_choice,
                 skip_reset_scene=True,
             )
 
-            print(f"Successfully loaded {len(tools_schema)} callable tools (including prompt wrappers and local helpers).")
-            action_reference = build_action_reference(tools_schema)
-            llm_with_tools = bind_model_tools(
-                llm,
-                [build_reasoned_action_tool(tools_schema)],
-                tool_choice=args.tool_choice,
-                parallel_tool_calls=False,
+            print(
+                "Successfully loaded "
+                f"{len(session.tools_schema)} callable tools (including prompt wrappers and local helpers)."
             )
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-                SystemMessage(content=action_reference),
-                HumanMessage(content=args.task),
-            ]
+            run_result = await run_reasoned_agent_loop(
+                mcp_client,
+                session.llm_with_tools,
+                session.messages,
+                max_steps=args.max_steps,
+                local_tool_handlers={
+                    "check_sorting_status": lambda client, tool_args: check_sorting_progress(client),
+                },
+                finish_summary_default="Task stopped before finish_task was called.",
+                log_prefix="Agent Executing",
+            )
 
-            iteration = 1
-            while iteration <= args.max_steps:
-                print(f"--- [Thinking - Step {iteration}] ---")
-                ai_msg = invoke_with_rate_limit_retry(llm_with_tools, messages)
-                if ai_msg.content:
-                    print(ai_msg.content)
-                messages.append(ai_msg)
+            if run_result.stop_reason == "finish_task":
+                print(f"\nFinal Report: {run_result.model_summary}")
+                return
 
-                tool_calls = list(ai_msg.tool_calls or [])
-                if not tool_calls:
-                    fallback_calls, fallback_tool_messages = parse_raw_tool_calls(ai_msg.content, iteration)
-                    tool_calls.extend(fallback_calls)
-                    messages.extend(fallback_tool_messages)
-                    if fallback_tool_messages and not tool_calls:
-                        tool_calls = [{"dummy": True}]
-
-                if not tool_calls:
-                    messages.append(
-                        build_retry_tool_message(
-                            iteration,
-                            "No valid tool call was produced.",
-                        )
-                    )
-                    iteration += 1
-                    continue
-
-                actionable_tool_calls = [tool_call for tool_call in tool_calls if "dummy" not in tool_call]
-                if len(actionable_tool_calls) > 1:
-                    print("   → Warning: model returned multiple actions in one step; executing only the first.")
-                    for extra_tool_call in actionable_tool_calls[1:]:
-                        messages.append(
-                            ToolMessage(
-                                tool_call_id=extra_tool_call["id"],
-                                name=extra_tool_call["name"],
-                                content=json.dumps(
-                                    {
-                                        "status": "error",
-                                        "message": (
-                                            "Only one `call_tool_with_reason` action is allowed per assistant turn. "
-                                            "This extra action was ignored. Wait for the next step before issuing another action."
-                                        ),
-                                    }
-                                ),
-                            )
-                        )
-                    tool_calls = [actionable_tool_calls[0]]
-
-                for tool_call in tool_calls:
-                    if "dummy" in tool_call:
-                        continue
-
-                    reason = str(tool_call["args"].get("reason", "")).strip()
-                    action_name = str(tool_call["args"].get("tool_name", "")).strip()
-                    action_args = tool_call["args"].get("tool_args", {})
-
-                    if not reason or not action_name or not isinstance(action_args, dict):
-                        result_str = json.dumps(
-                            {
-                                "status": "error",
-                                "message": (
-                                    "You must call `call_tool_with_reason` with non-empty `reason`, "
-                                    "valid `tool_name`, and object-valued `tool_args`."
-                                ),
-                            }
-                        )
-                        messages.append(
-                            ToolMessage(
-                                tool_call_id=tool_call["id"],
-                                name=tool_call["name"],
-                                content=result_str,
-                            )
-                        )
-                        continue
-
-                    print(f"   → Reason: {reason}")
-
-                    if action_name == "finish_task":
-                        result_str = await finish_task(mcp_client, action_args.get("summary", "Task finished."))
-                        messages.append(
-                            ToolMessage(
-                                tool_call_id=tool_call["id"],
-                                name=tool_call["name"],
-                                content=format_action_result(action_name, reason, result_str),
-                            )
-                        )
-                        print(f"\nFinal Report: {action_args.get('summary', 'Task finished.')}")
-                        return
-
-                    result_str = await execute_mcp_tool(
-                        mcp_client,
-                        action_name,
-                        action_args,
-                        local_tool_handlers={
-                            "check_sorting_status": lambda client, tool_args: check_sorting_progress(client),
-                        },
-                        log_prefix="Agent Executing",
-                    )
-                    messages.append(
-                        ToolMessage(
-                            tool_call_id=tool_call["id"],
-                            name=tool_call["name"],
-                            content=format_action_result(action_name, reason, result_str),
-                        )
-                    )
-
-                iteration += 1
-            else:
+            if run_result.stop_reason == "max_steps":
                 print(f"Safety Break: Reached the maximum of {args.max_steps} iterations.")
 
     except Exception as exc:

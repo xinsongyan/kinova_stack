@@ -39,16 +39,17 @@ from typing import Any
 from fastmcp import FastMCP
 import numpy as np
 
-# ── project imports (on PYTHONPATH via the run script) ──────────────────────
-from kinova_controller import KinovaController
-from kinova_mujoco_backend import KinovaMuJoCoBackend
-from kinova_backend import CartesianPose
+if __package__ in (None, ""):
+    # Preserve direct-script execution from the repo root while using package imports.
+    _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
 
-import sys as _sys
-_scenes_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "scenes"))
-if _scenes_dir not in _sys.path:
-    _sys.path.insert(0, _scenes_dir)
-from scene_selector import resolve_scene_number, select_scene  # noqa: E402
+from kinova_middleware.backend.controller import KinovaController
+from kinova_middleware.backend.factory import build_backend
+from kinova_middleware.backend.mcp_server.tool_registry import setup_tools
+from kinova_middleware.backend.mcp_server.toolsets.task_prompts import setup_prompts
+from kinova_middleware.scenes.scene_selector import resolve_scene_number, select_scene
 
 # ---------------------------------------------------------------------------
 # Configuration from environment
@@ -72,6 +73,7 @@ logging.basicConfig(
 # ---------------------------------------------------------------------------
 _controller: KinovaController | None = None
 _current_scene_path: str | None = None
+_mcp_configured = False
 
 # Only one motion command may run at a time.
 _motion_lock = threading.Lock()
@@ -104,16 +106,15 @@ def _build_controller_for_scene(scene_path: str) -> KinovaController:
     )
 
     if KINOVA_MODE == "sim":
-        backend = KinovaMuJoCoBackend(
-            model_path=scene_path,
+        backend = build_backend(
+            "sim",
+            scene_path=scene_path,
             viewer=True,
             target_speed_rad_s=TARGET_SPEED,
             ee_site="ee_marker",
         )
     elif KINOVA_MODE == "real":
-        from kinova_sdk_backend import KinovaSDKBackend
-
-        backend = KinovaSDKBackend()
+        backend = build_backend("real")
     else:
         raise ValueError(f"KINOVA_MODE must be 'sim' or 'real', got '{KINOVA_MODE}'")
 
@@ -316,6 +317,29 @@ def _quat_rotation_error(
 # Startup / shutdown
 # ---------------------------------------------------------------------------
 
+def _configure_mcp() -> None:
+    global _mcp_configured
+    if _mcp_configured:
+        return
+
+    capabilities = _get_controller().supported_capabilities()
+    tool_names = setup_tools(
+        mcp,
+        {
+            "get_controller": _get_controller,
+            "motion_lock": _motion_lock,
+            "physics_lock": _physics_lock,
+            "run_until_reached": _run_until_reached,
+            "reset_or_reload_scene": _reset_or_reload_scene,
+            "capabilities": capabilities,
+        },
+    )
+    prompt_names = setup_prompts(mcp, capabilities=capabilities)
+    _mcp_configured = True
+    log.info("Registered MCP tools: %s", ", ".join(tool_names) if tool_names else "(none)")
+    log.info("Registered MCP prompts: %s", ", ".join(prompt_names) if prompt_names else "(none)")
+
+
 def _startup() -> None:
     global _controller, _current_scene_path
 
@@ -324,6 +348,7 @@ def _startup() -> None:
     _current_scene_path = scene_path
     log.info("Selected scene: %s", os.path.basename(scene_path))
     _controller = _build_controller_for_scene(scene_path)
+    _configure_mcp()
     _move_home_after_init()
 
 
@@ -350,27 +375,15 @@ mcp = FastMCP(
 )
 
 # ---------------------------------------------------------------------------
-# Setup Tools and Prompts
-# ---------------------------------------------------------------------------
-from mcp_server.tools import setup_tools
-from mcp_server.prompts import setup_prompts
-
-setup_tools(mcp, {
-    "get_controller": _get_controller,
-    "motion_lock": _motion_lock,
-    "physics_lock": _physics_lock,
-    "run_until_reached": _run_until_reached,
-    "reset_or_reload_scene": _reset_or_reload_scene,
-})
-
-setup_prompts(mcp)
-
-# ---------------------------------------------------------------------------
 # Entrypoint
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     print("[mcp_kinova_server] Starting …", file=sys.stderr, flush=True)
     _startup()
     print("[mcp_kinova_server] Controller ready – launching MCP server.", file=sys.stderr, flush=True)
     mcp.run(transport="streamable-http")
+
+if __name__ == "__main__":
+    main()

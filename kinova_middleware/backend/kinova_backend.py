@@ -6,6 +6,8 @@ import math
 import time
 from typing import Any, Callable, Sequence
 
+from kinova_middleware.backend.interfaces.capabilities import BackendCapability
+
 
 _QUAT_NORM_EPS = 1e-8
 _QUAT_NORM_TOL = 1e-3
@@ -160,6 +162,23 @@ class KinovaBackend(ABC):
     def set_gripper_percent(self, percent: float) -> None:
         """Control gripper opening as a percentage in [0.0, 1.0]."""
 
+    def supported_capabilities(self) -> frozenset[BackendCapability]:
+        """Return the explicit capability set exposed by this backend.
+
+        Optional features should be declared here rather than inferred only
+        from structural typing so future runtimes can omit unsupported pieces
+        cleanly while the legacy backend facade still exists.
+        """
+        capabilities = {
+            BackendCapability.ARM_MOTION,
+            BackendCapability.IK_SOLVER,
+            BackendCapability.GRIPPER_CONTROL,
+            BackendCapability.SCENE_CONTROL,
+        }
+        if type(self).get_object_pose is not KinovaBackend.get_object_pose:
+            capabilities.add(BackendCapability.OBJECT_QUERY)
+        return frozenset(capabilities)
+
     def get_finger_forces(self) -> dict:
         """Read current finger actuator forces. Override in sim backends."""
         return {"forces": [], "max_abs_force": 0.0, "contact_detected": False}
@@ -189,6 +208,15 @@ class KinovaBackend(ABC):
         if hold_seconds > 0:
             time.sleep(min(float(timeout_s), float(hold_seconds)))
         return True
+
+    def get_object_pose(self, body_name: str) -> dict:
+        """Read the pose/metadata of a scene object when supported by the backend.
+
+        Simulation backends may override this to expose scene query capability.
+        Runtime backends without scene introspection should keep the default
+        behaviour and let callers handle the unsupported-operation error.
+        """
+        raise RuntimeError("Scene object queries are not supported by this backend.")
 
     def rotate_wrist(self, angle_deg: float) -> None:
         """Rotate the wrist (last arm joint) by a relative angle in degrees.
@@ -352,6 +380,9 @@ class SafetyWrapperBackend(KinovaBackend):
     def get_gripper_state(self) -> dict:
         return self._inner.get_gripper_state()
 
+    def supported_capabilities(self) -> frozenset[BackendCapability]:
+        return self._inner.supported_capabilities()
+
     def wait_for_gripper(
         self,
         timeout_s: float = 5.0,
@@ -367,6 +398,9 @@ class SafetyWrapperBackend(KinovaBackend):
             pos_tol_rad=pos_tol_rad,
             vel_tol_rad_s=vel_tol_rad_s,
         )
+
+    def get_object_pose(self, body_name: str) -> dict:
+        return self._inner.get_object_pose(body_name)
 
     def rotate_wrist(self, angle_deg: float) -> None:
         self._inner.rotate_wrist(angle_deg)
@@ -556,15 +590,7 @@ class SafetyWrapperBackend(KinovaBackend):
 
 def make_kinova_api(mode: str, **safety_kwargs: Any) -> KinovaBackend:
     """Factory for Kinova backends with safety wrapper."""
-    mode_key = mode.strip().lower()
-    if mode_key == "sim":
-        from kinova_mujoco_backend import KinovaMuJoCoBackend
+    from kinova_middleware.backend.factory import build_backend
 
-        inner = KinovaMuJoCoBackend()
-    elif mode_key == "real":
-        from kinova_sdk_backend import KinovaSDKBackend
-
-        inner = KinovaSDKBackend()
-    else:
-        raise ValueError("mode must be 'sim' or 'real'.")
+    inner = build_backend(mode)
     return SafetyWrapperBackend(inner, **safety_kwargs)

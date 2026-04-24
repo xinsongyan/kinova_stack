@@ -6,7 +6,7 @@ import sys
 import time
 from typing import Sequence
 
-from kinova_backend import KinovaBackend
+from kinova_middleware.backend.kinova_backend import KinovaBackend
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _KINOVA_API_PY_DIR = os.path.normpath(os.path.join(_THIS_DIR, "..", "..", "kinova-api-python"))
@@ -179,7 +179,7 @@ class KinovaSDKBackend(KinovaBackend):
 
     def _ensure_ik_backend(self):
         if self._ik_backend is None:
-            from kinova_mujoco_backend import KinovaMuJoCoBackend
+            from kinova_middleware.backend.kinova_mujoco_backend import KinovaMuJoCoBackend
 
             kwargs: dict[str, object] = {"viewer": False}
             if self._ik_model_path is not None:

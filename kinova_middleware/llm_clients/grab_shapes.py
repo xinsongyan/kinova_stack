@@ -15,37 +15,33 @@ Examples:
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 import time
 
+if __package__ in (None, ""):
+    _REPO_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if _REPO_ROOT not in sys.path:
+        sys.path.insert(0, _REPO_ROOT)
+
 from fastmcp import Client
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-from helper_functions import (
-    FINISH_TASK_TOOL,
-    VERIFY_OBJECT_LIFT_TOOL,
-    bind_model_tools,
-    build_action_reference,
-    build_reasoned_action_tool,
-    build_retry_tool_message,
+from kinova_middleware.llm_clients.scene_tools import reset_scene_if_available
+from kinova_middleware.llm_clients.status_reporting import (
     collect_grab_shapes_report,
-    execute_mcp_tool,
-    finish_task,
-    format_action_result,
     format_grab_shapes_report,
-    invoke_with_rate_limit_retry,
-    load_tools_and_prompts_from_mcp,
-    parse_raw_tool_calls,
     record_grab_verification,
-    reset_scene_if_available,
     verify_object_lift,
+)
+from kinova_middleware.llm_clients.tool_defs import FINISH_TASK_TOOL, VERIFY_OBJECT_LIFT_TOOL
+from kinova_middleware.llm_clients.workflow_runner import (
+    build_reasoned_agent_session,
+    run_reasoned_agent_loop,
 )
 
 
-DEFAULT_MODEL_NAME = "moonshotai/kimi-k2-instruct-0905"
+DEFAULT_MODEL_NAME = "meta/llama-4-maverick-17b-128e-instruct"
 DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 DEFAULT_SERVER_URL = "http://127.0.0.1:8000/mcp"
 DEFAULT_SCENE_NAME = "shapes.xml"
@@ -109,25 +105,15 @@ async def run_single_benchmark(
 ) -> dict:
     """Run one grab_shapes episode and return model and official results."""
     verification_history: dict = {}
-    tools_schema = await load_tools_and_prompts_from_mcp(
+    session = await build_reasoned_agent_session(
         mcp_client,
+        llm,
+        system_prompt=SYSTEM_PROMPT,
+        task=task,
         extra_tools=build_local_tools(),
+        tool_choice=tool_choice,
         skip_reset_scene=True,
     )
-    action_reference = build_action_reference(tools_schema)
-    llm_with_tools = bind_model_tools(
-        llm,
-        [build_reasoned_action_tool(tools_schema)],
-        tool_choice=tool_choice,
-        parallel_tool_calls=False,
-    )
-    messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        SystemMessage(content=action_reference),
-        HumanMessage(content=task),
-    ]
-    model_summary = "Task stopped before finish_task was called."
-    stop_reason = "max_steps"
 
     async def tracked_verify(client, tool_args):
         body_name = tool_args.get("body_name", "")
@@ -136,119 +122,17 @@ async def run_single_benchmark(
         record_grab_verification(verification_history, body_name, result, threshold)
         return result
 
-    for iteration in range(1, max_steps + 1):
-        print(f"--- [Thinking - Step {iteration}] ---")
-        ai_msg = invoke_with_rate_limit_retry(llm_with_tools, messages)
-        if ai_msg.content:
-            print(ai_msg.content)
-        messages.append(ai_msg)
-
-        tool_calls = list(ai_msg.tool_calls or [])
-        if not tool_calls:
-            fallback_calls, fallback_tool_messages = parse_raw_tool_calls(ai_msg.content, iteration)
-            tool_calls.extend(fallback_calls)
-            messages.extend(fallback_tool_messages)
-            if fallback_tool_messages and not tool_calls:
-                tool_calls = [{"dummy": True}]
-
-        if not tool_calls:
-            messages.append(
-                build_retry_tool_message(
-                    iteration,
-                    "No valid tool call was produced.",
-                )
-            )
-            continue
-
-        actionable_tool_calls = [tool_call for tool_call in tool_calls if "dummy" not in tool_call]
-        if len(actionable_tool_calls) > 1:
-            print("   → Warning: model returned multiple actions in one step; executing only the first.")
-            for extra_tool_call in actionable_tool_calls[1:]:
-                messages.append(
-                    ToolMessage(
-                        tool_call_id=extra_tool_call["id"],
-                        name=extra_tool_call["name"],
-                        content=json.dumps(
-                            {
-                                "status": "error",
-                                "message": (
-                                    "Only one `call_tool_with_reason` action is allowed per assistant turn. "
-                                    "This extra action was ignored. Wait for the next step before issuing another action."
-                                ),
-                            }
-                        ),
-                    )
-                )
-            tool_calls = [actionable_tool_calls[0]]
-
-        for tool_call in tool_calls:
-            if "dummy" in tool_call:
-                continue
-
-            reason = str(tool_call["args"].get("reason", "")).strip()
-            action_name = str(tool_call["args"].get("tool_name", "")).strip()
-            action_args = tool_call["args"].get("tool_args", {})
-
-            if not reason or not action_name or not isinstance(action_args, dict):
-                result_str = json.dumps(
-                    {
-                        "status": "error",
-                        "message": (
-                            "You must call `call_tool_with_reason` with non-empty `reason`, "
-                            "valid `tool_name`, and object-valued `tool_args`."
-                        ),
-                    }
-                )
-                messages.append(
-                    ToolMessage(
-                        tool_call_id=tool_call["id"],
-                        name=tool_call["name"],
-                        content=result_str,
-                    )
-                )
-                continue
-
-            print(f"   → Reason: {reason}")
-
-            if action_name == "finish_task":
-                model_summary = action_args.get("summary", "Task finished.")
-                stop_reason = "finish_task"
-                result_str = await finish_task(mcp_client, model_summary)
-                messages.append(
-                    ToolMessage(
-                        tool_call_id=tool_call["id"],
-                        name=tool_call["name"],
-                        content=format_action_result(action_name, reason, result_str),
-                    )
-                )
-                official_data = await collect_grab_shapes_report(
-                    mcp_client,
-                    verification_history,
-                    default_min_height=min_lift_height,
-                )
-                return {
-                    "stop_reason": stop_reason,
-                    "model_summary": model_summary,
-                    "official_data": official_data,
-                    "official_report": format_grab_shapes_report(official_data),
-                }
-
-            result_str = await execute_mcp_tool(
-                mcp_client,
-                action_name,
-                action_args,
-                local_tool_handlers={
-                    "verify_object_lift": tracked_verify,
-                },
-                log_prefix="Agent Executing",
-            )
-            messages.append(
-                ToolMessage(
-                    tool_call_id=tool_call["id"],
-                    name=tool_call["name"],
-                    content=format_action_result(action_name, reason, result_str),
-                )
-            )
+    run_result = await run_reasoned_agent_loop(
+        mcp_client,
+        session.llm_with_tools,
+        session.messages,
+        max_steps=max_steps,
+        local_tool_handlers={
+            "verify_object_lift": tracked_verify,
+        },
+        finish_summary_default="Task stopped before finish_task was called.",
+        log_prefix="Agent Executing",
+    )
 
     official_data = await collect_grab_shapes_report(
         mcp_client,
@@ -256,8 +140,8 @@ async def run_single_benchmark(
         default_min_height=min_lift_height,
     )
     return {
-        "stop_reason": stop_reason,
-        "model_summary": model_summary,
+        "stop_reason": run_result.stop_reason,
+        "model_summary": run_result.model_summary,
         "official_data": official_data,
         "official_report": format_grab_shapes_report(official_data),
     }
