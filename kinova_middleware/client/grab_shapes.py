@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compatibility entrypoint for the unified agent."""
+"""Compatibility entrypoint for the grab_shapes agent."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ if __package__ in (None, ""):
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
 
-from kinova_middleware.llm_clients.agents.ultimate_llm import main
+from kinova_middleware.client.agents.grab_shapes import main
 
 
 if __name__ == "__main__":

@@ -27,15 +27,15 @@ if __package__ in (None, ""):
 from fastmcp import Client
 from langchain_openai import ChatOpenAI
 
-from kinova_middleware.llm_clients.local_tools.status_reporting import (
+from kinova_middleware.client.local_tools.status_reporting import (
     collect_grab_shapes_report,
     format_grab_shapes_report,
     record_grab_verification,
     verify_object_lift,
 )
-from kinova_middleware.llm_clients.local_tools.tool_defs import FINISH_TASK_TOOL, VERIFY_OBJECT_LIFT_TOOL
-from kinova_middleware.llm_clients.mcp.scene_tools import reset_scene_if_available
-from kinova_middleware.llm_clients.runtime.workflow_runner import (
+from kinova_middleware.client.local_tools.tool_defs import FINISH_TASK_TOOL, VERIFY_OBJECT_LIFT_TOOL
+from kinova_middleware.client.mcp.scene_tools import reset_scene_if_available
+from kinova_middleware.client.runtime.workflow_runner import (
     build_reasoned_agent_session,
     run_reasoned_agent_loop,
 )

@@ -12,7 +12,7 @@ if __package__ in (None, ""):
     if _REPO_ROOT not in sys.path:
         sys.path.insert(0, _REPO_ROOT)
 
-from kinova_middleware.llm_clients.agents.sort_cubes import main
+from kinova_middleware.client.agents.sort_cubes import main
 
 
 if __name__ == "__main__":
